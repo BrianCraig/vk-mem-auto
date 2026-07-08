@@ -578,7 +578,7 @@ pub struct AllocationCreateInfo {
     /// and this allocation ends up as dedicated or is explicitly forced as dedicated using #VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT.
     /// Otherwise, it has the priority of a memory block where it is placed and this variable is ignored.
     pub priority: f32,
-    /// Additional minimum alignment to be used for all allocations. Defaults to 0. If not 0, it must be a power of two.
+    /// Additional minimum alignment to be used for this allocation. Defaults to 0. If not 0, it must be a power of two.
     ///
     /// When creating a buffer or an image, specifying a custom alignment is not needed in most cases, because Vulkan implementation
     /// inspects the `CreateInfo` structure (including intended usage flags) and returns required alignment through functions
