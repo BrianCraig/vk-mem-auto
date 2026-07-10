@@ -472,6 +472,12 @@ impl<'a> AllocatorCreateInfo<'a> {
             type_external_memory_handle_types: &[],
         }
     }
+
+    #[inline]
+    pub fn vulkan_api_version(mut self, vulkan_api_version: u32) -> Self {
+        self.vulkan_api_version = vulkan_api_version;
+        self
+    }
 }
 
 #[derive(Clone)]

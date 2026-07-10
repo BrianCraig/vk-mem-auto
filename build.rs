@@ -1,3 +1,14 @@
+#[cfg(feature = "build_shaders")]
+mod build_shaders;
+
+
+#[cfg(not(feature = "build_shaders"))]
+mod build_shaders {
+    pub fn build() -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+}
+
 #[cfg(feature = "generate_bindings")]
 extern crate bindgen;
 extern crate cc;
@@ -5,6 +16,8 @@ extern crate cc;
 use std::env;
 
 fn main() {
+    build_shaders::build().unwrap();
+
     let mut build = cc::Build::new();
 
     build.include("vendor/VulkanMemoryAllocator/include");

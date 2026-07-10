@@ -47,3 +47,13 @@ generate_bindings=["bindgen"]
 linked=["ash/linked"]
 loaded=["ash/loaded"]
 recording=[]
+build_shaders=["dep:naga", "dep:bytemuck"]
+
+[build-dependencies.naga]
+version = "29"
+features = ["wgsl-in", "spv-out"] 
+optional = true
+
+[build-dependencies.bytemuck]
+version = "1"
+optional = true
