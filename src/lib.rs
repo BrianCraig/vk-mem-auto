@@ -302,19 +302,7 @@ impl Allocator {
         );
     }
 
-    /// Returns current information about specified allocation and atomically marks it as used in current frame.
-    ///
-    /// Current parameters of given allocation are returned in the result object, available through accessors.
-    ///
-    /// This function also atomically "touches" allocation - marks it as used in current frame,
-    /// just like `Allocator::touch_allocation`.
-    ///
-    /// If the allocation is in lost state, `allocation.get_device_memory` returns `vk::DeviceMemory::null()`.
-    ///
-    /// Although this function uses atomics and doesn't lock any mutex, so it should be quite efficient,
-    /// you can avoid calling it too often.
-    ///
-    /// If you just want to check if allocation is not lost, `Allocator::touch_allocation` will work faster.
+    /// Returns current information about specified allocation.
     pub fn get_allocation_info(&self, allocation: &Allocation) -> AllocationInfo {
         unsafe {
             let mut allocation_info: ffi::VmaAllocationInfo = mem::zeroed();
