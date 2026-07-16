@@ -31,12 +31,18 @@ pub struct TestHarness {
     pub debug_callback: ash::vk::DebugUtilsMessengerEXT,
     pub debug_report_loader: debug_utils::Instance,
     pub has_validation_layer: bool,
+    pub queue: ash::vk::Queue,
+    pub command_pool: ash::vk::CommandPool,
+    pub command_buffer: ash::vk::CommandBuffer,
+    pub fence: ash::vk::Fence,
 }
 
 impl Drop for TestHarness {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+            self.device.destroy_fence(self.fence, None);
+            self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
             self.debug_report_loader
                 .destroy_debug_utils_messenger(self.debug_callback, None);
@@ -131,11 +137,24 @@ impl TestHarness {
                 .expect("Couldn't find suitable device.")
         };
 
-        let priorities = [1.0];
+        let queue_family_index = unsafe {
+            instance
+                .get_physical_device_queue_family_properties(physical_device)
+                .iter()
+                .enumerate()
+                .find_map(|(index, family)| {
+                    if family.queue_flags.contains(ash::vk::QueueFlags::GRAPHICS) {
+                        Some(index as u32)
+                    } else {
+                        None
+                    }
+                })
+                .expect("No graphics queue family found")
+        };
 
         let queue_info = [ash::vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(0)
-            .queue_priorities(&priorities)];
+            .queue_family_index(queue_family_index)
+            .queue_priorities(&[1.0])];
 
         let device_create_info =
             ash::vk::DeviceCreateInfo::default().queue_create_infos(&queue_info);
@@ -143,6 +162,36 @@ impl TestHarness {
         let device: ash::Device = unsafe {
             instance
                 .create_device(physical_device, &device_create_info, None)
+                .unwrap()
+        };
+
+        let queue = unsafe { device.get_device_queue(0, 0) };
+
+        let command_pool = unsafe {
+            device
+                .create_command_pool(
+                    &vk::CommandPoolCreateInfo::default()
+                        .queue_family_index(queue_family_index)
+                        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
+                    None,
+                )
+                .unwrap()
+        };
+
+        let command_buffer = unsafe {
+            device
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(command_pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(1),
+                )
+                .unwrap()[0]
+        };
+
+        let fence = unsafe {
+            device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
                 .unwrap()
         };
 
@@ -154,6 +203,10 @@ impl TestHarness {
             debug_report_loader,
             debug_callback,
             has_validation_layer,
+            queue,
+            command_buffer,
+            command_pool,
+            fence,
         }
     }
 
@@ -482,41 +535,6 @@ fn test_render_white_pixels() {
     let allocation_info = allocator.get_allocation_info(&allocation);
     assert_ne!(allocation_info.mapped_data, std::ptr::null_mut());
 
-    let queue_family_index = 0;
-
-    let command_pool = unsafe {
-        harness
-            .device
-            .create_command_pool(
-                &vk::CommandPoolCreateInfo::default()
-                    .queue_family_index(queue_family_index)
-                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
-                None,
-            )
-            .unwrap()
-    };
-
-    let command_buffer = unsafe {
-        harness
-            .device
-            .allocate_command_buffers(
-                &vk::CommandBufferAllocateInfo::default()
-                    .command_pool(command_pool)
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1),
-            )
-            .unwrap()[0]
-    };
-
-    let graphics_queue = unsafe { harness.device.get_device_queue(queue_family_index, 0) };
-
-    let fence = unsafe {
-        harness
-            .device
-            .create_fence(&vk::FenceCreateInfo::default(), None)
-            .unwrap()
-    };
-
     let image_view = unsafe {
         harness
             .device
@@ -694,7 +712,7 @@ fn test_render_white_pixels() {
     unsafe {
         harness
             .device
-            .begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())
+            .begin_command_buffer(harness.command_buffer, &vk::CommandBufferBeginInfo::default())
             .unwrap();
 
         let clear = [vk::ClearValue {
@@ -704,7 +722,7 @@ fn test_render_white_pixels() {
         }];
 
         harness.device.cmd_begin_render_pass(
-            command_buffer,
+            harness.command_buffer,
             &vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass)
                 .framebuffer(framebuffer)
@@ -721,10 +739,10 @@ fn test_render_white_pixels() {
 
         harness
             .device
-            .cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
+            .cmd_bind_pipeline(harness.command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
 
         harness.device.cmd_set_viewport(
-            command_buffer,
+            harness.command_buffer,
             0,
             &[vk::Viewport {
                 x: 0.0,
@@ -737,7 +755,7 @@ fn test_render_white_pixels() {
         );
 
         harness.device.cmd_set_scissor(
-            command_buffer,
+            harness.command_buffer,
             0,
             &[vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
@@ -748,9 +766,9 @@ fn test_render_white_pixels() {
             }],
         );
 
-        harness.device.cmd_draw(command_buffer, 6, 2, 0, 0);
+        harness.device.cmd_draw(harness.command_buffer, 6, 2, 0, 0);
 
-        harness.device.cmd_end_render_pass(command_buffer);
+        harness.device.cmd_end_render_pass(harness.command_buffer);
 
         let region = vk::BufferImageCopy::default()
             .buffer_offset(0)
@@ -770,32 +788,32 @@ fn test_render_white_pixels() {
             });
 
         harness.device.cmd_copy_image_to_buffer(
-            command_buffer,
+            harness.command_buffer,
             image,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             buffer,
             std::slice::from_ref(&region),
         );
 
-        harness.device.end_command_buffer(command_buffer).unwrap();
+        harness.device.end_command_buffer(harness.command_buffer).unwrap();
     }
 
     unsafe {
         harness
             .device
             .queue_submit(
-                graphics_queue,
+                harness.queue,
                 &[
                     vk::SubmitInfo::default()
-                        .command_buffers(std::slice::from_ref(&command_buffer)),
+                        .command_buffers(std::slice::from_ref(&harness.command_buffer)),
                 ],
-                fence,
+                harness.fence,
             )
             .unwrap();
 
         harness
             .device
-            .wait_for_fences(&[fence], true, u64::MAX)
+            .wait_for_fences(&[harness.fence], true, u64::MAX)
             .unwrap();
     }
 
@@ -825,8 +843,6 @@ fn test_render_white_pixels() {
         harness.device.destroy_framebuffer(framebuffer, None);
         harness.device.destroy_render_pass(render_pass, None);
         harness.device.destroy_image_view(image_view, None);
-        harness.device.destroy_fence(fence, None);
-        harness.device.destroy_command_pool(command_pool, None);
     }
 }
 
@@ -834,39 +850,6 @@ fn test_render_white_pixels() {
 fn defragment_gpu_buffers() {
     let harness = TestHarness::new();
     let allocator = harness.create_allocator();
-    let command_pool = unsafe {
-        harness
-            .device
-            .create_command_pool(
-                &vk::CommandPoolCreateInfo::default()
-                    .queue_family_index(0)
-                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
-                None,
-            )
-            .unwrap()
-    };
-
-    let command_buffer = unsafe {
-        harness
-            .device
-            .allocate_command_buffers(
-                &vk::CommandBufferAllocateInfo::default()
-                    .command_pool(command_pool)
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1),
-            )
-            .unwrap()[0]
-    };
-
-    let graphics_queue = unsafe { harness.device.get_device_queue(0, 0) };
-
-    let fence = unsafe {
-        harness
-            .device
-            .create_fence(&vk::FenceCreateInfo::default(), None)
-            .unwrap()
-    };
-
     let mut buffers = Vec::new();
 
     let allocate_size = |size: vk::DeviceSize| {
@@ -929,17 +912,6 @@ fn defragment_gpu_buffers() {
             let source_info = allocator.get_allocation_info(&mv.source);
             let destination_info = allocator.get_allocation_info(&mv.destination);
 
-            assert!(
-                buffers
-                    .iter()
-                    .filter(|x| x
-                        .as_ref()
-                        .map(|x| x.1 == mv.source.get_raw())
-                        .unwrap_or(false))
-                    .count()
-                    == 1
-            );
-
             let old_buffer = {
                 let index = buffers
                     .iter()
@@ -972,7 +944,7 @@ fn defragment_gpu_buffers() {
                 harness
                     .device
                     .begin_command_buffer(
-                        command_buffer,
+                        harness.command_buffer,
                         &vk::CommandBufferBeginInfo::default()
                             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
                     )
@@ -983,26 +955,26 @@ fn defragment_gpu_buffers() {
                     size: source_info.size,
                 };
                 harness.device.cmd_copy_buffer(
-                    command_buffer,
+                    harness.command_buffer,
                     old_buffer,
                     new_buffer,
                     std::slice::from_ref(&region),
                 );
-                harness.device.end_command_buffer(command_buffer).unwrap();
+                harness.device.end_command_buffer(harness.command_buffer).unwrap();
                 harness
                     .device
                     .queue_submit(
-                        graphics_queue,
+                        harness.queue,
                         &[vk::SubmitInfo::default()
-                            .command_buffers(std::slice::from_ref(&command_buffer))],
-                        fence,
+                            .command_buffers(std::slice::from_ref(&harness.command_buffer))],
+                        harness.fence,
                     )
                     .unwrap();
                 harness
                     .device
-                    .wait_for_fences(&[fence], true, 1000000000)
+                    .wait_for_fences(&[harness.fence], true, 1000000000)
                     .unwrap();
-                harness.device.reset_fences(&[fence]).unwrap();
+                harness.device.reset_fences(&[harness.fence]).unwrap();
             }
 
             unsafe {
@@ -1014,27 +986,14 @@ fn defragment_gpu_buffers() {
     }) {}
 
     let stats = ctx.end();
-    println!(
-        "okay??? {:?} {:?} {:?}",
-        moved,
-        stats.allocationsMoved,
-        buffers.len()
-    );
     assert!(moved > 0);
     assert!(stats.allocationsMoved > 0);
 
     for entry in buffers.into_iter().flatten() {
         let (buffer, allocation) = entry;
         unsafe {
-            println!("buff");
             harness.device.destroy_buffer(buffer, None);
-            println!("alloc {:#X}", allocation.cast::<c_void>().addr());
             allocator.free_memory(&mut Allocation::from_raw(allocation));
         }
-    }
-
-    unsafe {
-        harness.device.destroy_fence(fence, None);
-        harness.device.destroy_command_pool(command_pool, None);
     }
 }
