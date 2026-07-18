@@ -1,10 +1,12 @@
 //! Easy to use, high performance memory manager for Vulkan.
 
+mod auto;
 mod definitions;
 mod defragmentation;
 mod ffi;
 mod pool;
 mod virtual_block;
+pub use auto::*;
 pub use definitions::*;
 pub use defragmentation::*;
 pub use ffi::{VmaDetailedStatistics, VmaStatistics};

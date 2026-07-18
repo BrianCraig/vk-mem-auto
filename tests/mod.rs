@@ -2,7 +2,7 @@ extern crate ash;
 extern crate vk_mem;
 
 use ash::{ext::debug_utils, vk};
-use std::{mem::ManuallyDrop, num::NonZero, ops::Deref, os::raw::c_void, sync::Arc};
+use std::{os::raw::c_void, sync::Arc};
 use vk_mem::{Alloc, Allocation};
 
 fn extension_names() -> Vec<*const i8> {
@@ -214,6 +214,16 @@ impl TestHarness {
         let create_info =
             vk_mem::AllocatorCreateInfo::new(&self.instance, &self.device, self.physical_device);
         unsafe { vk_mem::Allocator::new(create_info).unwrap() }
+    }
+
+    pub fn create_allocator_single_thread(&self) -> vk_mem::AllocatorSingleThread<'_> {
+        vk_mem::AllocatorSingleThread::new(
+            &self.instance,
+            &self.device,
+            self.physical_device,
+            self.queue,
+            self.command_pool,
+        )
     }
 }
 
@@ -712,7 +722,10 @@ fn test_render_white_pixels() {
     unsafe {
         harness
             .device
-            .begin_command_buffer(harness.command_buffer, &vk::CommandBufferBeginInfo::default())
+            .begin_command_buffer(
+                harness.command_buffer,
+                &vk::CommandBufferBeginInfo::default(),
+            )
             .unwrap();
 
         let clear = [vk::ClearValue {
@@ -737,9 +750,11 @@ fn test_render_white_pixels() {
             vk::SubpassContents::INLINE,
         );
 
-        harness
-            .device
-            .cmd_bind_pipeline(harness.command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
+        harness.device.cmd_bind_pipeline(
+            harness.command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            pipeline,
+        );
 
         harness.device.cmd_set_viewport(
             harness.command_buffer,
@@ -795,7 +810,10 @@ fn test_render_white_pixels() {
             std::slice::from_ref(&region),
         );
 
-        harness.device.end_command_buffer(harness.command_buffer).unwrap();
+        harness
+            .device
+            .end_command_buffer(harness.command_buffer)
+            .unwrap();
     }
 
     unsafe {
@@ -803,10 +821,8 @@ fn test_render_white_pixels() {
             .device
             .queue_submit(
                 harness.queue,
-                &[
-                    vk::SubmitInfo::default()
-                        .command_buffers(std::slice::from_ref(&harness.command_buffer)),
-                ],
+                &[vk::SubmitInfo::default()
+                    .command_buffers(std::slice::from_ref(&harness.command_buffer))],
                 harness.fence,
             )
             .unwrap();
@@ -960,7 +976,10 @@ fn defragment_gpu_buffers() {
                     new_buffer,
                     std::slice::from_ref(&region),
                 );
-                harness.device.end_command_buffer(harness.command_buffer).unwrap();
+                harness
+                    .device
+                    .end_command_buffer(harness.command_buffer)
+                    .unwrap();
                 harness
                     .device
                     .queue_submit(
@@ -995,5 +1014,52 @@ fn defragment_gpu_buffers() {
             harness.device.destroy_buffer(buffer, None);
             allocator.free_memory(&mut Allocation::from_raw(allocation));
         }
+    }
+}
+
+#[test]
+fn auto_test() {
+    let harness = TestHarness::new();
+    let mut allocator = harness.create_allocator_single_thread();
+
+    let mut handles = vec![];
+
+    for _ in 0..64 {
+        handles.push(
+            allocator.allocate(
+                vk_mem::CreateInfo::Buffer(
+                    vk::BufferCreateInfo::default()
+                        .size(1024 * 256)
+                        .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
+                ),
+                vk_mem::AllocationUsage::Readback,
+            ),
+        );
+    }
+
+    for i in 0..(handles.len() / 2) {
+        let handle = handles.remove(i).unwrap();
+        unsafe { allocator.free(handle).unwrap() };
+    }
+
+    for _ in 0..8 {
+        handles.push(
+            allocator.allocate(
+                vk_mem::CreateInfo::Buffer(
+                    vk::BufferCreateInfo::default()
+                        .size(1024 * 1024)
+                        .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
+                ),
+                vk_mem::AllocationUsage::Readback,
+            ),
+        );
+    }
+
+    unsafe {
+        allocator.defrag();
+    }
+
+    for handle in handles {
+        unsafe { allocator.free(handle.unwrap()).unwrap() };
     }
 }
