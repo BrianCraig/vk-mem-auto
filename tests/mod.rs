@@ -3,7 +3,7 @@ extern crate vk_mem;
 
 use ash::{ext::debug_utils, vk};
 use std::{os::raw::c_void, sync::Arc};
-use vk_mem::{Alloc, Allocation};
+use vk_mem::{Alloc, Allocation, ManagedAllocationHandle};
 
 fn extension_names() -> Vec<*const i8> {
     vec![debug_utils::NAME.as_ptr()]
@@ -1024,42 +1024,66 @@ fn auto_test() {
 
     let mut handles = vec![];
 
+    let map_and_write = |allocator: &vk_mem::AllocatorSingleThread<'_>,
+                         handle: ManagedAllocationHandle,
+                         value: u8| {
+        let owned_map = allocator.map(handle).unwrap();
+        let size = 256;
+        unsafe {
+            owned_map.pointer().write_bytes(value, size);
+        }
+        owned_map.flush();
+    };
+
     for _ in 0..64 {
         handles.push(
-            allocator.allocate(
-                vk_mem::CreateInfo::Buffer(
-                    vk::BufferCreateInfo::default()
-                        .size(1024 * 256)
-                        .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
-                ),
-                vk_mem::AllocationUsage::Readback,
-            ),
+            allocator
+                .allocate(
+                    vk_mem::CreateInfo::Buffer(
+                        vk::BufferCreateInfo::default()
+                            .size(1024 * 256)
+                            .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
+                    ),
+                    vk_mem::AllocationUsage::Readback,
+                )
+                .unwrap(),
         );
     }
 
     for i in 0..(handles.len() / 2) {
-        let handle = handles.remove(i).unwrap();
+        let handle = handles.remove(i);
         unsafe { allocator.free(handle).unwrap() };
     }
 
     for _ in 0..8 {
         handles.push(
-            allocator.allocate(
-                vk_mem::CreateInfo::Buffer(
-                    vk::BufferCreateInfo::default()
-                        .size(1024 * 1024)
-                        .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
-                ),
-                vk_mem::AllocationUsage::Readback,
-            ),
+            allocator
+                .allocate(
+                    vk_mem::CreateInfo::Buffer(
+                        vk::BufferCreateInfo::default()
+                            .size(1024 * 1024)
+                            .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
+                    ),
+                    vk_mem::AllocationUsage::Readback,
+                )
+                .unwrap(),
         );
     }
+
+    handles
+        .iter()
+        .enumerate()
+        .for_each(|(index, handle)| map_and_write(&allocator, *handle, index as u8));
 
     unsafe {
         allocator.defrag();
     }
 
-    for handle in handles {
-        unsafe { allocator.free(handle.unwrap()).unwrap() };
+    for (index, handle) in handles.iter().enumerate() {
+        let owned_map = allocator.map(*handle).unwrap();
+        let slice = unsafe { std::slice::from_raw_parts(owned_map.pointer(), 256) };
+        assert!(slice.iter().all(|e| *e == index as u8));
+        drop(owned_map);
+        unsafe { allocator.free(*handle).unwrap() };
     }
 }

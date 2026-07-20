@@ -3,7 +3,7 @@ use std::ops::BitOr;
 use ash::prelude::VkResult;
 use ash::vk::{self, BufferCreateInfo, ImageCreateInfo};
 
-use crate::Alloc;
+use crate::{Alloc, Allocation, AllocationCreateFlags};
 
 #[derive(Clone)]
 pub enum AllocationUsage {
@@ -61,6 +61,13 @@ impl<'a> ManagedAllocation<'a> {
         match self.create_info {
             CreateInfo::Image(ici) => ici.clone(),
             _ => panic!(""),
+        }
+    }
+
+    fn get_size(&self) -> u64 {
+        match self.create_info {
+            CreateInfo::Image(_) => todo!(),
+            CreateInfo::Buffer(bci) => bci.size,
         }
     }
 }
@@ -148,7 +155,14 @@ impl<'a> AllocatorSingleThread<'a> {
                     unsafe { self.device.create_buffer(buffer_create_info, None).unwrap() };
                 let allocation = unsafe {
                     self.allocator
-                        .allocate_memory_for_buffer(buffer, &crate::AllocationCreateInfo::default())
+                        .allocate_memory_for_buffer(
+                            buffer,
+                            &crate::AllocationCreateInfo {
+                                flags: AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+                                required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
+                                ..Default::default()
+                            },
+                        )
                         .unwrap()
                 };
                 let allocation_info = self.allocator.get_allocation_info(&allocation);
@@ -232,8 +246,25 @@ impl<'a> AllocatorSingleThread<'a> {
     /// Returns the mapped memory of the resource. Drop it when unused.
     ///
     /// Ensure all returned instances are dropped before freeing or defragging this resource.
-    pub fn map(&self, handle: ManagedAllocationHandle) -> VkResult<OwnedMap> {
-        todo!()
+    pub fn map(&self, handle: ManagedAllocationHandle) -> VkResult<OwnedMap<'_>> {
+        let alloc = self
+            .managed_allocations
+            .get(handle.index)
+            .expect("index should be between bounds")
+            .as_ref()
+            .expect("Alloc is destroyed")
+            .get_vma_alloc();
+        let mut crate_alloc = unsafe { Allocation::from_raw(alloc) };
+        let pointer = unsafe { self.allocator.map_memory(&mut crate_alloc) }.unwrap();
+
+        //self.allocator.unmap_memory(allocation);
+        //self.allocator.map_memory(allocation)
+        Ok(OwnedMap {
+            device: self.device,
+            allocator: &self.allocator,
+            allocation: crate_alloc.0,
+            pointer,
+        })
     }
 
     /// Defrags all allocated memory.
@@ -323,7 +354,7 @@ impl<'a> AllocatorSingleThread<'a> {
                             self.device.cmd_copy_image(
                                 self.command_buffer,
                                 *image,
-                                ash::vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                ash::vk::ImageLayout::TRANSFER_SRC_OPTIMAL, // TODO: We need to track the layouts
                                 new_image,
                                 ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                                 std::slice::from_ref(&ash::vk::ImageCopy {
@@ -379,6 +410,23 @@ impl<'a> AllocatorSingleThread<'a> {
             }
         }) {}
     }
+
+    pub fn get_device_memory_and_offset(
+        &self,
+        ManagedAllocationHandle { index }: ManagedAllocationHandle,
+    ) -> (vk::DeviceMemory, u64) {
+        let alloc = self
+            .managed_allocations
+            .get(index)
+            .expect("index should be between bounds")
+            .as_ref()
+            .expect("Alloc is destroyed")
+            .get_vma_alloc();
+        let info = self
+            .allocator
+            .get_allocation_info(&unsafe { Allocation::from_raw(alloc) });
+        (info.device_memory, info.offset)
+    }
 }
 
 impl<'a> Drop for AllocatorSingleThread<'a> {
@@ -389,40 +437,48 @@ impl<'a> Drop for AllocatorSingleThread<'a> {
     }
 }
 
-pub struct OwnedMap {}
-
-/*
-/// Thread-safe wrapper around [`AllocatorSingleThread`].
-///
-/// This type is `Send + Sync + Clone`.
-#[derive(Clone)]
-pub struct AllocatorThreadSafe<'a> {
-    inner: Arc<AllocatorThreadSafeInner<'a>>,
+pub struct OwnedMap<'a> {
+    device: &'a ash::Device,
+    allocator: &'a crate::Allocator,
+    allocation: crate::ffi::VmaAllocation,
+    pointer: *mut u8,
 }
 
-struct AllocatorThreadSafeInner<'a> {
-    allocator: RwLock<AllocatorSingleThread<'a>>,
-}
+impl<'a> OwnedMap<'a> {
+    pub fn pointer(&self) -> *mut u8 {
+        self.pointer
+    }
 
-impl<'a> AllocatorThreadSafe<'a> {
-    pub fn new(allocator: AllocatorSingleThread<'a>) -> Self {
-        Self {
-            inner: Arc::new(AllocatorThreadSafeInner {
-                allocator: RwLock::new(allocator),
-            }),
+    /// Flushes the whole size of the mapped resource.
+    /// 
+    /// TODO: This should check if HOST_COHERENT and skip it.
+    pub fn flush(&self) {
+        let crate::AllocationInfo {
+            device_memory,
+            offset,
+            ..
+        } = self
+            .allocator
+            .get_allocation_info(&unsafe { crate::Allocation::from_raw(self.allocation) });
+
+        let memory_range = vk::MappedMemoryRange::default()
+            .memory(device_memory)
+            .offset(offset)
+            .size(vk::WHOLE_SIZE);
+
+        unsafe {
+            self.device
+                .flush_mapped_memory_ranges(&[memory_range])
+                .expect("Failed to flush mapped memory ranges.");
         }
     }
+}
 
-    pub fn allocate(&self) {
-        self.inner.allocator.write().unwrap().allocate();
-    }
-
-    pub fn free(&self) {
-        self.inner.allocator.write().unwrap().free();
-    }
-
-    pub fn defragment(&self) {
-        self.inner.allocator.write().unwrap().defragment();
+impl<'a> Drop for OwnedMap<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            self.allocator
+                .unmap_memory(&mut crate::Allocation::from_raw(self.allocation))
+        };
     }
 }
-    */
