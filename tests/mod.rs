@@ -1038,12 +1038,10 @@ fn auto_test() {
     for _ in 0..64 {
         handles.push(
             allocator
-                .allocate(
-                    vk_mem::CreateInfo::Buffer(
-                        vk::BufferCreateInfo::default()
-                            .size(1024 * 256)
-                            .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
-                    ),
+                .allocate_buffer(
+                    vk::BufferCreateInfo::default()
+                        .size(1024 * 256)
+                        .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
                     vk_mem::AllocationUsage::Readback,
                 )
                 .unwrap(),
@@ -1058,12 +1056,10 @@ fn auto_test() {
     for _ in 0..8 {
         handles.push(
             allocator
-                .allocate(
-                    vk_mem::CreateInfo::Buffer(
-                        vk::BufferCreateInfo::default()
-                            .size(1024 * 1024)
-                            .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
-                    ),
+                .allocate_buffer(
+                    vk::BufferCreateInfo::default()
+                        .size(1024 * 1024)
+                        .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
                     vk_mem::AllocationUsage::Readback,
                 )
                 .unwrap(),

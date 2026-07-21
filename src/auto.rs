@@ -3,7 +3,7 @@ use std::ops::BitOr;
 use ash::prelude::VkResult;
 use ash::vk::{self, BufferCreateInfo, ImageCreateInfo};
 
-use crate::{Alloc, Allocation, AllocationCreateFlags};
+use crate::{Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo};
 
 #[derive(Clone)]
 pub enum AllocationUsage {
@@ -20,15 +20,9 @@ pub enum AllocationUsage {
 }
 
 #[derive(Clone)]
-pub enum CreateInfo<'a> {
-    Buffer(BufferCreateInfo<'a>),
-    Image(ImageCreateInfo<'a>),
-}
-
-#[derive(Clone)]
-pub enum Resource {
-    Buffer(vk::Buffer, crate::ffi::VmaAllocation),
-    Image(vk::Image, crate::ffi::VmaAllocation),
+pub enum Resource<'a> {
+    Buffer(vk::Buffer, crate::ffi::VmaAllocation, BufferCreateInfo<'a>),
+    Image(vk::Image, crate::ffi::VmaAllocation, ImageCreateInfo<'a>),
 }
 
 // stub
@@ -38,37 +32,35 @@ pub type MemorySelector = fn(MemorySelectorInfo) -> MemorySelection;
 
 #[derive(Clone)]
 pub struct ManagedAllocation<'a> {
-    create_info: CreateInfo<'a>,
     usage: AllocationUsage,
-    resource: Resource,
+    resource: Resource<'a>,
+    size: vk::DeviceSize,
+    mem_offset: (vk::DeviceMemory, vk::DeviceSize),
 }
 
 impl<'a> ManagedAllocation<'a> {
     fn get_vma_alloc(&self) -> crate::ffi::VmaAllocation {
         match self.resource {
-            Resource::Buffer(_, pointer) => pointer,
-            Resource::Image(_, pointer) => pointer,
+            Resource::Buffer(_, pointer, _) => pointer,
+            Resource::Image(_, pointer, _) => pointer,
         }
     }
 
     fn get_bci(&self) -> BufferCreateInfo<'_> {
-        match self.create_info {
-            CreateInfo::Buffer(bci) => bci.clone(),
-            _ => panic!(""),
+        match self.resource {
+            Resource::Buffer(_, _, bci) => bci.clone(),
+            Resource::Image(_, _, _) => panic!(),
         }
     }
     fn get_ici(&self) -> ImageCreateInfo<'_> {
-        match self.create_info {
-            CreateInfo::Image(ici) => ici.clone(),
-            _ => panic!(""),
+        match self.resource {
+            Resource::Buffer(_, _, _) => panic!(),
+            Resource::Image(_, _, ici) => ici.clone(),
         }
     }
 
     fn get_size(&self) -> u64 {
-        match self.create_info {
-            CreateInfo::Image(_) => todo!(),
-            CreateInfo::Buffer(bci) => bci.size,
-        }
+        self.size
     }
 }
 
@@ -128,28 +120,8 @@ impl<'a> AllocatorSingleThread<'a> {
         }
     }
 
-    pub fn allocate(
-        &mut self,
-        create_info: CreateInfo<'a>,
-        usage: AllocationUsage,
-    ) -> VkResult<ManagedAllocationHandle> {
-        // TODO: use first available
-        let index = self.managed_allocations.len();
-        let ci_with_flags =
-            match create_info {
-                CreateInfo::Buffer(buffer_create_info) => {
-                    CreateInfo::Buffer(buffer_create_info.usage(buffer_create_info.usage.bitor(
-                        vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST,
-                    )))
-                }
-                CreateInfo::Image(image_create_info) => {
-                    CreateInfo::Image(image_create_info.usage(image_create_info.usage.bitor(
-                        vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST,
-                    )))
-                }
-            };
-
-        let aci = match usage {
+    fn aci(usage: &AllocationUsage) -> AllocationCreateInfo {
+        match usage {
             AllocationUsage::GpuOnly => crate::AllocationCreateInfo {
                 required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 ..Default::default()
@@ -177,56 +149,86 @@ impl<'a> AllocatorSingleThread<'a> {
                 ..Default::default()
             },
             AllocationUsage::Custom(_) => todo!(),
+        }
+    }
+
+    pub fn allocate_buffer(
+        &mut self,
+        buffer_create_info: vk::BufferCreateInfo<'a>,
+        usage: AllocationUsage,
+    ) -> VkResult<ManagedAllocationHandle> {
+        // TODO: use first available
+        let index = self.managed_allocations.len();
+        let aci = Self::aci(&usage);
+        let buffer_create_info = buffer_create_info.usage(
+            buffer_create_info
+                .usage
+                .bitor(vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST),
+        );
+
+        let buffer = unsafe {
+            self.device
+                .create_buffer(&buffer_create_info, None)
+                .unwrap()
+        };
+        let allocation = unsafe {
+            self.allocator
+                .allocate_memory_for_buffer(buffer, &aci)
+                .unwrap()
+        };
+        let allocation_info = self.allocator.get_allocation_info(&allocation);
+        unsafe {
+            self.device
+                .bind_buffer_memory(
+                    buffer,
+                    allocation_info.device_memory,
+                    allocation_info.offset,
+                )
+                .unwrap()
         };
 
-        let resource = match &ci_with_flags {
-            CreateInfo::Buffer(buffer_create_info) => {
-                let buffer =
-                    unsafe { self.device.create_buffer(buffer_create_info, None).unwrap() };
-                let allocation = unsafe {
-                    self.allocator
-                        .allocate_memory_for_buffer(
-                            buffer,
-                            &aci,
-                        )
-                        .unwrap()
-                };
-                let allocation_info = self.allocator.get_allocation_info(&allocation);
-                unsafe {
-                    self.device
-                        .bind_buffer_memory(
-                            buffer,
-                            allocation_info.device_memory,
-                            allocation_info.offset,
-                        )
-                        .unwrap()
-                }
-                Resource::Buffer(buffer, allocation.get_raw())
-            }
-            CreateInfo::Image(image_create_info) => {
-                let image = unsafe { self.device.create_image(image_create_info, None).unwrap() };
-                let allocation = unsafe {
-                    self.allocator
-                        .allocate_memory_for_image(image, &aci)
-                        .unwrap()
-                };
-                let allocation_info = self.allocator.get_allocation_info(&allocation);
-                unsafe {
-                    self.device
-                        .bind_image_memory(
-                            image,
-                            allocation_info.device_memory,
-                            allocation_info.offset,
-                        )
-                        .unwrap()
-                }
-                Resource::Image(image, allocation.get_raw())
-            }
-        };
         self.managed_allocations.push(Some(ManagedAllocation {
-            create_info: ci_with_flags,
             usage: usage,
-            resource,
+            resource: Resource::Buffer(buffer, allocation.get_raw(), buffer_create_info),
+            size: allocation_info.size,
+            mem_offset: (allocation_info.device_memory, allocation_info.offset),
+        }));
+
+        Ok(ManagedAllocationHandle { index })
+    }
+
+    pub fn allocate_image(
+        &mut self,
+        image_create_info: vk::ImageCreateInfo<'a>,
+        usage: AllocationUsage,
+    ) -> VkResult<ManagedAllocationHandle> {
+        // TODO: use first available
+        let index = self.managed_allocations.len();
+        let aci = Self::aci(&usage);
+        let image_create_info = image_create_info.usage(
+            image_create_info
+                .usage
+                .bitor(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST),
+        );
+
+        let image = unsafe { self.device.create_image(&image_create_info, None).unwrap() };
+        let allocation = unsafe {
+            self.allocator
+                .allocate_memory_for_image(image, &aci)
+                .unwrap()
+        };
+        let allocation_info = self.allocator.get_allocation_info(&allocation);
+        unsafe {
+            self.device
+                .bind_image_memory(image, allocation_info.device_memory, allocation_info.offset)
+                .unwrap()
+        };
+
+        self.managed_allocations.push(Some(ManagedAllocation {
+            usage: usage,
+            resource: Resource::Image(image, allocation.get_raw(), image_create_info),
+            size: allocation_info.size,
+            mem_offset: (allocation_info.device_memory, allocation_info.offset),
         }));
 
         Ok(ManagedAllocationHandle { index })
@@ -247,12 +249,12 @@ impl<'a> AllocatorSingleThread<'a> {
             .unwrap()
             .resource)
         {
-            Resource::Buffer(buffer, allocation) => {
+            Resource::Buffer(buffer, allocation, _) => {
                 self.device.destroy_buffer(*buffer, None);
                 self.allocator
                     .free_memory(&mut crate::Allocation::from_raw(*allocation));
             }
-            Resource::Image(image, allocation) => {
+            Resource::Image(image, allocation, _) => {
                 self.device.destroy_image(*image, None);
                 self.allocator
                     .free_memory(&mut crate::Allocation::from_raw(*allocation));
@@ -261,6 +263,7 @@ impl<'a> AllocatorSingleThread<'a> {
         Ok(())
     }
 
+    /// Why from a handle? Implementation should be in ManagedAllocation(&self), handle must only search it in alloc and call. 
     pub fn get_buffer(&self, handle: ManagedAllocationHandle) -> VkResult<vk::Buffer> {
         todo!()
     }
@@ -331,13 +334,13 @@ impl<'a> AllocatorSingleThread<'a> {
                     .clone()
                     .take()
                     .unwrap();
-                man_alloc.resource = match &man_alloc.resource {
-                    Resource::Buffer(buffer, alloc) => Resource::Buffer(
+                man_alloc.resource = match man_alloc.resource {
+                    Resource::Buffer(buffer, alloc, bci) => Resource::Buffer(
                         unsafe {
-                            destroy_buffers.push(*buffer);
+                            destroy_buffers.push(buffer);
                             let new_buffer = self
                                 .device
-                                .create_buffer(&man_alloc.get_bci(), None)
+                                .create_buffer(&bci, None)
                                 .unwrap();
                             self.device
                                 .bind_buffer_memory(
@@ -348,7 +351,7 @@ impl<'a> AllocatorSingleThread<'a> {
                                 .unwrap();
                             self.device.cmd_copy_buffer(
                                 self.command_buffer,
-                                *buffer,
+                                buffer,
                                 new_buffer,
                                 std::slice::from_ref(&vk::BufferCopy {
                                     src_offset: 0,
@@ -358,14 +361,15 @@ impl<'a> AllocatorSingleThread<'a> {
                             );
                             new_buffer
                         },
-                        *alloc,
+                        alloc,
+                        bci,
                     ),
-                    Resource::Image(image, alloc) => Resource::Image(
+                    Resource::Image(image, alloc, ici) => Resource::Image(
                         unsafe {
-                            destroy_images.push(*image);
+                            destroy_images.push(image);
                             let new_image = self
                                 .device
-                                .create_image(&man_alloc.get_ici(), None)
+                                .create_image(&ici, None)
                                 .unwrap();
                             self.device
                                 .bind_image_memory(
@@ -374,10 +378,9 @@ impl<'a> AllocatorSingleThread<'a> {
                                     destination_info.offset,
                                 )
                                 .unwrap();
-                            let ici = man_alloc.get_ici();
                             self.device.cmd_copy_image(
                                 self.command_buffer,
-                                *image,
+                                image,
                                 ash::vk::ImageLayout::TRANSFER_SRC_OPTIMAL, // TODO: We need to track the layouts
                                 new_image,
                                 ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -405,7 +408,8 @@ impl<'a> AllocatorSingleThread<'a> {
                             );
                             new_image
                         },
-                        *alloc,
+                        alloc,
+                        ici
                     ),
                 };
 
