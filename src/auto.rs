@@ -149,6 +149,36 @@ impl<'a> AllocatorSingleThread<'a> {
                 }
             };
 
+        let aci = match usage {
+            AllocationUsage::GpuOnly => crate::AllocationCreateInfo {
+                required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                ..Default::default()
+            },
+            AllocationUsage::Upload => crate::AllocationCreateInfo {
+                flags: AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+                required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
+                preferred_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+                ..Default::default()
+            },
+            AllocationUsage::Readback => crate::AllocationCreateInfo {
+                flags: AllocationCreateFlags::HOST_ACCESS_RANDOM,
+                required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
+                preferred_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL
+                    | vk::MemoryPropertyFlags::HOST_CACHED,
+                ..Default::default()
+            },
+            AllocationUsage::Cpu => crate::AllocationCreateInfo {
+                flags: AllocationCreateFlags::HOST_ACCESS_RANDOM,
+                required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
+                preferred_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL
+                    | vk::MemoryPropertyFlags::HOST_COHERENT
+                    | vk::MemoryPropertyFlags::HOST_CACHED,
+                ..Default::default()
+            },
+            AllocationUsage::Custom(_) => todo!(),
+        };
+
         let resource = match &ci_with_flags {
             CreateInfo::Buffer(buffer_create_info) => {
                 let buffer =
@@ -157,11 +187,7 @@ impl<'a> AllocatorSingleThread<'a> {
                     self.allocator
                         .allocate_memory_for_buffer(
                             buffer,
-                            &crate::AllocationCreateInfo {
-                                flags: AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-                                required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
-                                ..Default::default()
-                            },
+                            &aci,
                         )
                         .unwrap()
                 };
@@ -181,7 +207,7 @@ impl<'a> AllocatorSingleThread<'a> {
                 let image = unsafe { self.device.create_image(image_create_info, None).unwrap() };
                 let allocation = unsafe {
                     self.allocator
-                        .allocate_memory_for_image(image, &crate::AllocationCreateInfo::default())
+                        .allocate_memory_for_image(image, &aci)
                         .unwrap()
                 };
                 let allocation_info = self.allocator.get_allocation_info(&allocation);
@@ -257,8 +283,6 @@ impl<'a> AllocatorSingleThread<'a> {
         let mut crate_alloc = unsafe { Allocation::from_raw(alloc) };
         let pointer = unsafe { self.allocator.map_memory(&mut crate_alloc) }.unwrap();
 
-        //self.allocator.unmap_memory(allocation);
-        //self.allocator.map_memory(allocation)
         Ok(OwnedMap {
             device: self.device,
             allocator: &self.allocator,
@@ -450,7 +474,7 @@ impl<'a> OwnedMap<'a> {
     }
 
     /// Flushes the whole size of the mapped resource.
-    /// 
+    ///
     /// TODO: This should check if HOST_COHERENT and skip it.
     pub fn flush(&self) {
         let crate::AllocationInfo {
