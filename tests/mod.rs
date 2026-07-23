@@ -216,7 +216,7 @@ impl TestHarness {
         unsafe { vk_mem::Allocator::new(create_info).unwrap() }
     }
 
-    pub fn create_allocator_single_thread(&self) -> vk_mem::AllocatorSingleThread {
+    pub fn create_allocator_single_thread(&self) -> vk_mem::AllocatorHandle {
         vk_mem::AllocatorSingleThread::new(
             &self.instance,
             &self.device,
@@ -1024,16 +1024,18 @@ fn auto_test() {
 
     let mut handles = vec![];
 
-    let map_and_write = |allocator: &vk_mem::AllocatorSingleThread,
-                         handle: ManagedAllocationHandle,
-                         value: u8| {
-        let owned_map = allocator.map(handle).unwrap();
-        let size = 256;
-        unsafe {
-            owned_map.pointer().write_bytes(value, size);
-        }
-        owned_map.flush();
-    };
+    let map_and_write =
+        |allocator: &vk_mem::AllocatorHandle, handle: ManagedAllocationHandle, value: u8| {
+            allocator
+                .map(handle, |pointer, flush| {
+                    let size = 256;
+                    unsafe {
+                        pointer.write_bytes(value, size);
+                    }
+                    flush();
+                })
+                .unwrap();
+        };
 
     for _ in 0..64 {
         handles.push(
@@ -1076,10 +1078,12 @@ fn auto_test() {
     }
 
     for (index, handle) in handles.iter().enumerate() {
-        let owned_map = allocator.map(*handle).unwrap();
-        let slice = unsafe { std::slice::from_raw_parts(owned_map.pointer(), 256) };
-        assert!(slice.iter().all(|e| *e == index as u8));
-        drop(owned_map);
+        allocator
+            .map(*handle, |pointer, _| {
+                let slice = unsafe { std::slice::from_raw_parts(pointer, 256) };
+                assert!(slice.iter().all(|e| *e == index as u8));
+            })
+            .unwrap();
         unsafe { allocator.free(*handle).unwrap() };
     }
 }
@@ -1087,7 +1091,7 @@ fn auto_test() {
 #[test]
 fn handle_incorrect_handlers_usage() {
     let harness = TestHarness::new();
-    let mut allocator = harness.create_allocator_single_thread();
+    let allocator = harness.create_allocator_single_thread();
 
     let handle = allocator
         .allocate_buffer(

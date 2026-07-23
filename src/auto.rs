@@ -1,7 +1,7 @@
 mod ash_owned;
 
-use std::cell::RefCell;
-use std::ops::BitOr;
+use std::cell::{RefCell};
+use std::ops::{BitOr, Deref};
 use std::rc::Rc;
 
 use ash::prelude::VkResult;
@@ -30,7 +30,11 @@ pub enum Resource {
         crate::ffi::VmaAllocation,
         ash_owned::BufferCreateInfoOwned,
     ),
-    Image(vk::Image, crate::ffi::VmaAllocation, ash_owned::ImageCreateInfoOwned),
+    Image(
+        vk::Image,
+        crate::ffi::VmaAllocation,
+        ash_owned::ImageCreateInfoOwned,
+    ),
 }
 
 // stub
@@ -72,7 +76,58 @@ impl ManagedAllocation {
     }
 }
 
-struct AllocatorHandle(Rc<RefCell<AllocatorSingleThread>>);
+#[derive(Clone)]
+pub struct AllocatorHandle(Rc<RefCell<AllocatorSingleThread>>);
+
+impl Deref for AllocatorHandle {
+    type Target = RefCell<AllocatorSingleThread>;
+
+    fn deref<'a>(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<AllocatorSingleThread> for AllocatorHandle {
+    fn from(inner: AllocatorSingleThread) -> Self {
+        AllocatorHandle(Rc::new(RefCell::new(inner)))
+    }
+}
+
+impl AllocatorHandle {
+    pub fn allocate_buffer(
+        &self,
+        buffer_create_info: vk::BufferCreateInfo<'_>,
+        usage: AllocationUsage,
+    ) -> VkResult<ManagedAllocationHandle> {
+        self.0
+            .borrow_mut()
+            .allocate_buffer(buffer_create_info, usage)
+    }
+
+    pub fn allocate_image(
+        &self,
+        image_create_info: vk::ImageCreateInfo<'_>,
+        usage: AllocationUsage,
+    ) -> VkResult<ManagedAllocationHandle> {
+        self.0.borrow_mut().allocate_image(image_create_info, usage)
+    }
+
+    pub unsafe fn free(&self, handle: ManagedAllocationHandle) -> VkResult<()> {
+        self.0.borrow_mut().free(handle)
+    }
+
+    /// Map and write to the pointer
+    pub fn map<F>(&self, handle: ManagedAllocationHandle, f: F) -> VkResult<()>
+    where
+        F: FnOnce(*mut u8, &dyn Fn()),
+    {
+        self.0.borrow().map(handle, f)
+    }
+
+    pub unsafe fn defrag(&mut self) {
+        self.0.borrow_mut().defrag()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HandleError {
@@ -119,7 +174,7 @@ impl AllocatorSingleThread {
         physical_device: ash::vk::PhysicalDevice,
         queue: ash::vk::Queue,
         command_pool: ash::vk::CommandPool,
-    ) -> Self {
+    ) -> AllocatorHandle {
         let create_info = crate::AllocatorCreateInfo::new(instance, device, physical_device);
         let allocator = unsafe { crate::Allocator::new(create_info).unwrap() };
         let command_buffer = unsafe {
@@ -146,6 +201,7 @@ impl AllocatorSingleThread {
             command_buffer,
             fence,
         }
+        .into()
     }
 
     fn aci(usage: &AllocationUsage) -> AllocationCreateInfo {
@@ -302,10 +358,10 @@ impl AllocatorSingleThread {
         todo!()
     }
 
-    /// Returns the mapped memory of the resource. Drop it when unused.
-    ///
-    /// Ensure all returned instances are dropped before freeing or defragging this resource.
-    pub fn map<'a>(&'a self, handle: ManagedAllocationHandle) -> VkResult<OwnedMap<'a>> {
+    pub fn map<F>(&self, handle: ManagedAllocationHandle, f: F) -> VkResult<()>
+    where
+        F: FnOnce(*mut u8, &dyn Fn()),
+    {
         let alloc = self
             .managed_allocations
             .get(handle.index)
@@ -315,13 +371,28 @@ impl AllocatorSingleThread {
             .get_vma_alloc();
         let mut crate_alloc = unsafe { Allocation::from_raw(alloc) };
         let pointer = unsafe { self.allocator.map_memory(&mut crate_alloc) }.unwrap();
+        let crate::AllocationInfo {
+            device_memory,
+            offset,
+            ..
+        } = self.allocator.get_allocation_info(&crate_alloc);
+        let flush = || {
+            let memory_range = vk::MappedMemoryRange::default()
+                .memory(device_memory)
+                .offset(offset)
+                .size(vk::WHOLE_SIZE);
 
-        Ok(OwnedMap {
-            device: &self.device,
-            allocator: &self.allocator,
-            allocation: crate_alloc.0,
-            pointer,
-        })
+            unsafe {
+                self.device
+                    .flush_mapped_memory_ranges(&[memory_range])
+                    .expect("Failed to flush mapped memory ranges.");
+            }
+        };
+        f(pointer, &flush);
+        unsafe {
+            self.allocator.unmap_memory(&mut crate_alloc);
+        };
+        Ok(())
     }
 
     /// Defrags all allocated memory.
@@ -488,51 +559,5 @@ impl Drop for AllocatorSingleThread {
         unsafe {
             self.device.destroy_fence(self.fence, None);
         }
-    }
-}
-
-pub struct OwnedMap<'a> {
-    device: &'a ash::Device,
-    allocator: &'a crate::Allocator,
-    allocation: crate::ffi::VmaAllocation,
-    pointer: *mut u8,
-}
-
-impl<'a> OwnedMap<'a> {
-    pub fn pointer(&self) -> *mut u8 {
-        self.pointer
-    }
-
-    /// Flushes the whole size of the mapped resource.
-    ///
-    /// TODO: This should check if HOST_COHERENT and skip it.
-    pub fn flush(&self) {
-        let crate::AllocationInfo {
-            device_memory,
-            offset,
-            ..
-        } = self
-            .allocator
-            .get_allocation_info(&unsafe { crate::Allocation::from_raw(self.allocation) });
-
-        let memory_range = vk::MappedMemoryRange::default()
-            .memory(device_memory)
-            .offset(offset)
-            .size(vk::WHOLE_SIZE);
-
-        unsafe {
-            self.device
-                .flush_mapped_memory_ranges(&[memory_range])
-                .expect("Failed to flush mapped memory ranges.");
-        }
-    }
-}
-
-impl<'a> Drop for OwnedMap<'a> {
-    fn drop(&mut self) {
-        unsafe {
-            self.allocator
-                .unmap_memory(&mut crate::Allocation::from_raw(self.allocation))
-        };
     }
 }
