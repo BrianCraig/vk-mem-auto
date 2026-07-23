@@ -1,4 +1,8 @@
+mod ash_owned;
+
+use std::cell::RefCell;
 use std::ops::BitOr;
+use std::rc::Rc;
 
 use ash::prelude::VkResult;
 use ash::vk::{self, BufferCreateInfo, ImageCreateInfo};
@@ -20,9 +24,13 @@ pub enum AllocationUsage {
 }
 
 #[derive(Clone)]
-pub enum Resource<'a> {
-    Buffer(vk::Buffer, crate::ffi::VmaAllocation, BufferCreateInfo<'a>),
-    Image(vk::Image, crate::ffi::VmaAllocation, ImageCreateInfo<'a>),
+pub enum Resource {
+    Buffer(
+        vk::Buffer,
+        crate::ffi::VmaAllocation,
+        ash_owned::BufferCreateInfoOwned,
+    ),
+    Image(vk::Image, crate::ffi::VmaAllocation, ash_owned::ImageCreateInfoOwned),
 }
 
 // stub
@@ -31,14 +39,14 @@ type MemorySelection = u64;
 pub type MemorySelector = fn(MemorySelectorInfo) -> MemorySelection;
 
 #[derive(Clone)]
-pub struct ManagedAllocation<'a> {
+pub struct ManagedAllocation {
     usage: AllocationUsage,
-    resource: Resource<'a>,
+    resource: Resource,
     size: vk::DeviceSize,
     mem_offset: (vk::DeviceMemory, vk::DeviceSize),
 }
 
-impl<'a> ManagedAllocation<'a> {
+impl ManagedAllocation {
     fn get_vma_alloc(&self) -> crate::ffi::VmaAllocation {
         match self.resource {
             Resource::Buffer(_, pointer, _) => pointer,
@@ -46,22 +54,30 @@ impl<'a> ManagedAllocation<'a> {
         }
     }
 
-    fn get_bci(&self) -> BufferCreateInfo<'_> {
+    fn get_bci<'a>(&self) -> BufferCreateInfo<'a> {
         match self.resource {
-            Resource::Buffer(_, _, bci) => bci.clone(),
+            Resource::Buffer(_, _, bcio) => (&bcio).into(),
             Resource::Image(_, _, _) => panic!(),
         }
     }
-    fn get_ici(&self) -> ImageCreateInfo<'_> {
+    fn get_ici<'a>(&self) -> ImageCreateInfo<'a> {
         match self.resource {
             Resource::Buffer(_, _, _) => panic!(),
-            Resource::Image(_, _, ici) => ici.clone(),
+            Resource::Image(_, _, icio) => (&icio).into(),
         }
     }
 
     fn get_size(&self) -> u64 {
         self.size
     }
+}
+
+struct AllocatorHandle(Rc<RefCell<AllocatorSingleThread>>);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HandleError {
+    FreedResource,
+    DroppedAllocator,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -72,20 +88,32 @@ pub struct ManagedAllocationHandle {
     // TODO: add generation and reuse the handle
 }
 
+// static mut REGISTRY: Vec<(Option<NonNull<AllocatorSingleThread>>, u64)> = Vec::new();
+
+impl ManagedAllocationHandle {
+    pub(crate) fn inner(&self) -> Result<&ManagedAllocation, HandleError> {
+        Err(HandleError::FreedResource)
+    }
+
+    pub fn get_size(&self) -> Result<u64, HandleError> {
+        Ok(0) // self.size
+    }
+}
+
 /// Allocator.
 ///
 /// If you need `Send + Sync + Clone`, use [`AllocatorThreadSafe`].
-pub struct AllocatorSingleThread<'a> {
+pub struct AllocatorSingleThread {
     allocator: crate::Allocator,
-    device: &'a ash::Device,
-    managed_allocations: Vec<Option<ManagedAllocation<'a>>>,
+    device: ash::Device,
+    managed_allocations: Vec<Option<ManagedAllocation>>,
     queue: ash::vk::Queue,
     command_buffer: ash::vk::CommandBuffer,
     fence: ash::vk::Fence,
 }
 
-impl<'a> AllocatorSingleThread<'a> {
-    pub fn new(
+impl AllocatorSingleThread {
+    pub fn new<'a>(
         instance: &'a ash::Instance,
         device: &'a ash::Device,
         physical_device: ash::vk::PhysicalDevice,
@@ -112,7 +140,7 @@ impl<'a> AllocatorSingleThread<'a> {
 
         Self {
             allocator,
-            device,
+            device: (*device).clone(),
             managed_allocations: vec![],
             queue,
             command_buffer,
@@ -154,7 +182,7 @@ impl<'a> AllocatorSingleThread<'a> {
 
     pub fn allocate_buffer(
         &mut self,
-        buffer_create_info: vk::BufferCreateInfo<'a>,
+        buffer_create_info: vk::BufferCreateInfo<'_>,
         usage: AllocationUsage,
     ) -> VkResult<ManagedAllocationHandle> {
         // TODO: use first available
@@ -165,6 +193,7 @@ impl<'a> AllocatorSingleThread<'a> {
                 .usage
                 .bitor(vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST),
         );
+        let buffer_create_info_owned = buffer_create_info.try_into().unwrap();
 
         let buffer = unsafe {
             self.device
@@ -189,7 +218,7 @@ impl<'a> AllocatorSingleThread<'a> {
 
         self.managed_allocations.push(Some(ManagedAllocation {
             usage: usage,
-            resource: Resource::Buffer(buffer, allocation.get_raw(), buffer_create_info),
+            resource: Resource::Buffer(buffer, allocation.get_raw(), buffer_create_info_owned),
             size: allocation_info.size,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
         }));
@@ -199,7 +228,7 @@ impl<'a> AllocatorSingleThread<'a> {
 
     pub fn allocate_image(
         &mut self,
-        image_create_info: vk::ImageCreateInfo<'a>,
+        image_create_info: vk::ImageCreateInfo<'_>,
         usage: AllocationUsage,
     ) -> VkResult<ManagedAllocationHandle> {
         // TODO: use first available
@@ -210,6 +239,7 @@ impl<'a> AllocatorSingleThread<'a> {
                 .usage
                 .bitor(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST),
         );
+        let image_create_info_owned = image_create_info.try_into().unwrap();
 
         let image = unsafe { self.device.create_image(&image_create_info, None).unwrap() };
         let allocation = unsafe {
@@ -226,7 +256,7 @@ impl<'a> AllocatorSingleThread<'a> {
 
         self.managed_allocations.push(Some(ManagedAllocation {
             usage: usage,
-            resource: Resource::Image(image, allocation.get_raw(), image_create_info),
+            resource: Resource::Image(image, allocation.get_raw(), image_create_info_owned),
             size: allocation_info.size,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
         }));
@@ -263,7 +293,7 @@ impl<'a> AllocatorSingleThread<'a> {
         Ok(())
     }
 
-    /// Why from a handle? Implementation should be in ManagedAllocation(&self), handle must only search it in alloc and call. 
+    /// Why from a handle? Implementation should be in ManagedAllocation(&self), handle must only search it in alloc and call.
     pub fn get_buffer(&self, handle: ManagedAllocationHandle) -> VkResult<vk::Buffer> {
         todo!()
     }
@@ -275,7 +305,7 @@ impl<'a> AllocatorSingleThread<'a> {
     /// Returns the mapped memory of the resource. Drop it when unused.
     ///
     /// Ensure all returned instances are dropped before freeing or defragging this resource.
-    pub fn map(&self, handle: ManagedAllocationHandle) -> VkResult<OwnedMap<'_>> {
+    pub fn map<'a>(&'a self, handle: ManagedAllocationHandle) -> VkResult<OwnedMap<'a>> {
         let alloc = self
             .managed_allocations
             .get(handle.index)
@@ -287,7 +317,7 @@ impl<'a> AllocatorSingleThread<'a> {
         let pointer = unsafe { self.allocator.map_memory(&mut crate_alloc) }.unwrap();
 
         Ok(OwnedMap {
-            device: self.device,
+            device: &self.device,
             allocator: &self.allocator,
             allocation: crate_alloc.0,
             pointer,
@@ -322,7 +352,7 @@ impl<'a> AllocatorSingleThread<'a> {
                 let index = self
                     .managed_allocations
                     .iter()
-                    .position(|x: &Option<ManagedAllocation<'_>>| {
+                    .position(|x: &Option<ManagedAllocation>| {
                         x.as_ref()
                             .is_some_and(|x| x.get_vma_alloc() == mv.source.get_raw())
                     })
@@ -335,13 +365,11 @@ impl<'a> AllocatorSingleThread<'a> {
                     .take()
                     .unwrap();
                 man_alloc.resource = match man_alloc.resource {
-                    Resource::Buffer(buffer, alloc, bci) => Resource::Buffer(
+                    Resource::Buffer(buffer, alloc, bcio) => Resource::Buffer(
                         unsafe {
                             destroy_buffers.push(buffer);
-                            let new_buffer = self
-                                .device
-                                .create_buffer(&bci, None)
-                                .unwrap();
+                            let bci = (&bcio).into();
+                            let new_buffer = self.device.create_buffer(&bci, None).unwrap();
                             self.device
                                 .bind_buffer_memory(
                                     new_buffer,
@@ -362,15 +390,13 @@ impl<'a> AllocatorSingleThread<'a> {
                             new_buffer
                         },
                         alloc,
-                        bci,
+                        bcio,
                     ),
-                    Resource::Image(image, alloc, ici) => Resource::Image(
+                    Resource::Image(image, alloc, icio) => Resource::Image(
                         unsafe {
                             destroy_images.push(image);
-                            let new_image = self
-                                .device
-                                .create_image(&ici, None)
-                                .unwrap();
+                            let ici = (&icio).into();
+                            let new_image = self.device.create_image(&ici, None).unwrap();
                             self.device
                                 .bind_image_memory(
                                     new_image,
@@ -409,7 +435,7 @@ impl<'a> AllocatorSingleThread<'a> {
                             new_image
                         },
                         alloc,
-                        ici
+                        icio,
                     ),
                 };
 
@@ -457,7 +483,7 @@ impl<'a> AllocatorSingleThread<'a> {
     }
 }
 
-impl<'a> Drop for AllocatorSingleThread<'a> {
+impl Drop for AllocatorSingleThread {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_fence(self.fence, None);

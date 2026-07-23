@@ -216,7 +216,7 @@ impl TestHarness {
         unsafe { vk_mem::Allocator::new(create_info).unwrap() }
     }
 
-    pub fn create_allocator_single_thread(&self) -> vk_mem::AllocatorSingleThread<'_> {
+    pub fn create_allocator_single_thread(&self) -> vk_mem::AllocatorSingleThread {
         vk_mem::AllocatorSingleThread::new(
             &self.instance,
             &self.device,
@@ -1024,7 +1024,7 @@ fn auto_test() {
 
     let mut handles = vec![];
 
-    let map_and_write = |allocator: &vk_mem::AllocatorSingleThread<'_>,
+    let map_and_write = |allocator: &vk_mem::AllocatorSingleThread,
                          handle: ManagedAllocationHandle,
                          value: u8| {
         let owned_map = allocator.map(handle).unwrap();
@@ -1082,4 +1082,25 @@ fn auto_test() {
         drop(owned_map);
         unsafe { allocator.free(*handle).unwrap() };
     }
+}
+
+#[test]
+fn handle_incorrect_handlers_usage() {
+    let harness = TestHarness::new();
+    let mut allocator = harness.create_allocator_single_thread();
+
+    let handle = allocator
+        .allocate_buffer(
+            vk::BufferCreateInfo::default()
+                .size(1024 * 1024)
+                .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
+            vk_mem::AllocationUsage::Readback,
+        )
+        .unwrap();
+
+    assert!(handle.get_size().is_ok());
+
+    assert!(unsafe { allocator.free(handle) }.is_ok());
+
+    assert_eq!(handle.get_size(), Err(vk_mem::HandleError::FreedResource));
 }
