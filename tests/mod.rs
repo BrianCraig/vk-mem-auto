@@ -1024,18 +1024,17 @@ fn auto_test() {
 
     let mut handles = vec![];
 
-    let map_and_write =
-        |allocator: &vk_mem::AllocatorHandle, handle: ManagedAllocationHandle, value: u8| {
-            allocator
-                .map(handle, |pointer, flush| {
-                    let size = 256;
-                    unsafe {
-                        pointer.write_bytes(value, size);
-                    }
-                    flush();
-                })
-                .unwrap();
-        };
+    fn map_and_write(handle: &ManagedAllocationHandle, value: u8) {
+        let size = handle.size().unwrap() as usize;
+        handle
+            .map(|pointer, flush| {
+                unsafe {
+                    pointer.write_bytes(value, size);
+                }
+                flush();
+            })
+            .unwrap();
+    }
 
     for _ in 0..64 {
         handles.push(
@@ -1052,7 +1051,7 @@ fn auto_test() {
 
     for i in 0..(handles.len() / 2) {
         let handle = handles.remove(i);
-        unsafe { allocator.free(handle).unwrap() };
+        unsafe { handle.free().unwrap() };
     }
 
     for _ in 0..8 {
@@ -1071,20 +1070,21 @@ fn auto_test() {
     handles
         .iter()
         .enumerate()
-        .for_each(|(index, handle)| map_and_write(&allocator, *handle, index as u8));
+        .for_each(|(index, handle)| map_and_write(handle, index as u8));
 
     unsafe {
         allocator.defrag();
     }
 
     for (index, handle) in handles.iter().enumerate() {
-        allocator
-            .map(*handle, |pointer, _| {
-                let slice = unsafe { std::slice::from_raw_parts(pointer, 256) };
+        let size = handle.size().unwrap() as usize;
+        handle
+            .map(|pointer, _| {
+                let slice = unsafe { std::slice::from_raw_parts(pointer, size) };
                 assert!(slice.iter().all(|e| *e == index as u8));
             })
             .unwrap();
-        unsafe { allocator.free(*handle).unwrap() };
+        unsafe { handle.free().unwrap() };
     }
 }
 
@@ -1093,7 +1093,7 @@ fn handle_incorrect_handlers_usage() {
     let harness = TestHarness::new();
     let allocator = harness.create_allocator_single_thread();
 
-    let handle = allocator
+    let handle: ManagedAllocationHandle = allocator
         .allocate_buffer(
             vk::BufferCreateInfo::default()
                 .size(1024 * 1024)
@@ -1102,9 +1102,9 @@ fn handle_incorrect_handlers_usage() {
         )
         .unwrap();
 
-    assert!(handle.get_size().is_ok());
+    assert!(handle.size().unwrap() == 1024 * 1024);
 
-    assert!(unsafe { allocator.free(handle) }.is_ok());
+    assert!(unsafe { handle.free() }.is_ok());
 
-    assert_eq!(handle.get_size(), Err(vk_mem::HandleError::FreedResource));
+    assert_eq!(handle.size(), Err(vk_mem::HandleError::FreedResource));
 }

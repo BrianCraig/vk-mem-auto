@@ -1,6 +1,6 @@
 mod ash_owned;
 
-use std::cell::{RefCell};
+use std::cell::RefCell;
 use std::ops::{BitOr, Deref};
 use std::rc::Rc;
 
@@ -70,10 +70,6 @@ impl ManagedAllocation {
             Resource::Image(_, _, icio) => (&icio).into(),
         }
     }
-
-    fn get_size(&self) -> u64 {
-        self.size
-    }
 }
 
 #[derive(Clone)]
@@ -101,7 +97,7 @@ impl AllocatorHandle {
     ) -> VkResult<ManagedAllocationHandle> {
         self.0
             .borrow_mut()
-            .allocate_buffer(buffer_create_info, usage)
+            .allocate_buffer(buffer_create_info, usage, self.clone())
     }
 
     pub fn allocate_image(
@@ -109,19 +105,9 @@ impl AllocatorHandle {
         image_create_info: vk::ImageCreateInfo<'_>,
         usage: AllocationUsage,
     ) -> VkResult<ManagedAllocationHandle> {
-        self.0.borrow_mut().allocate_image(image_create_info, usage)
-    }
-
-    pub unsafe fn free(&self, handle: ManagedAllocationHandle) -> VkResult<()> {
-        self.0.borrow_mut().free(handle)
-    }
-
-    /// Map and write to the pointer
-    pub fn map<F>(&self, handle: ManagedAllocationHandle, f: F) -> VkResult<()>
-    where
-        F: FnOnce(*mut u8, &dyn Fn()),
-    {
-        self.0.borrow().map(handle, f)
+        self.0
+            .borrow_mut()
+            .allocate_image(image_create_info, usage, self.clone())
     }
 
     pub unsafe fn defrag(&mut self) {
@@ -135,12 +121,11 @@ pub enum HandleError {
     DroppedAllocator,
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct ManagedAllocationHandle {
-    // TODO: add atomic alloc id match to ensure its the same allocator.
+    allocator: AllocatorHandle,
     // Maybe should be ManagedBufferHandle and ManagedImageHandle
     index: usize,
-    // TODO: add generation and reuse the handle
 }
 
 // static mut REGISTRY: Vec<(Option<NonNull<AllocatorSingleThread>>, u64)> = Vec::new();
@@ -150,11 +135,25 @@ impl ManagedAllocationHandle {
         Err(HandleError::FreedResource)
     }
 
-    pub fn get_size(&self) -> Result<u64, HandleError> {
-        Ok(0) // self.size
+    pub fn size(&self) -> Result<u64, HandleError> {
+        if let Some(ma) = self.allocator.borrow().at(self.index) {
+            Ok(ma.size)
+        } else {
+            Err(HandleError::FreedResource)
+        }
+    }
+
+    pub unsafe fn free(&self) -> VkResult<()> {
+        unsafe { self.allocator.borrow_mut().free(self.index) }
+    }
+
+    pub fn map<F>(&self, f: F) -> VkResult<()>
+    where
+        F: FnOnce(*mut u8, &dyn Fn()),
+    {
+        self.allocator.borrow().map(self.index, f)
     }
 }
-
 /// Allocator.
 ///
 /// If you need `Send + Sync + Clone`, use [`AllocatorThreadSafe`].
@@ -236,10 +235,18 @@ impl AllocatorSingleThread {
         }
     }
 
+    fn at<'a>(&'a self, index: usize) -> Option<&'a ManagedAllocation> {
+        self.managed_allocations
+            .get(index)
+            .map(|r| r.as_ref())
+            .unwrap_or(None)
+    }
+
     pub fn allocate_buffer(
         &mut self,
         buffer_create_info: vk::BufferCreateInfo<'_>,
         usage: AllocationUsage,
+        allocator_handle: AllocatorHandle,
     ) -> VkResult<ManagedAllocationHandle> {
         // TODO: use first available
         let index = self.managed_allocations.len();
@@ -279,13 +286,18 @@ impl AllocatorSingleThread {
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
         }));
 
-        Ok(ManagedAllocationHandle { index })
+        Ok(ManagedAllocationHandle {
+            index,
+            allocator: allocator_handle,
+        })
     }
 
     pub fn allocate_image(
         &mut self,
         image_create_info: vk::ImageCreateInfo<'_>,
         usage: AllocationUsage,
+
+        allocator_handle: AllocatorHandle,
     ) -> VkResult<ManagedAllocationHandle> {
         // TODO: use first available
         let index = self.managed_allocations.len();
@@ -317,24 +329,23 @@ impl AllocatorSingleThread {
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
         }));
 
-        Ok(ManagedAllocationHandle { index })
+        Ok(ManagedAllocationHandle {
+            index,
+            allocator: allocator_handle,
+        })
     }
 
     /// Destroys the Buffer/Image associated with it.
     ///
     /// You must ensure that the Resource associated with it is not being used
-    pub unsafe fn free(&mut self, handle: ManagedAllocationHandle) -> VkResult<()> {
+    unsafe fn free(&mut self, index: usize) -> VkResult<()> {
         self.managed_allocations
-            .get(handle.index)
+            .get(index)
             .expect("index should be between bounds")
             .as_ref()
             .expect("Alloc is destroyed");
         // TODO: do checks of generation and allocator id.
-        match &(self.managed_allocations[handle.index]
-            .take()
-            .unwrap()
-            .resource)
-        {
+        match &(self.managed_allocations[index].take().unwrap().resource) {
             Resource::Buffer(buffer, allocation, _) => {
                 self.device.destroy_buffer(*buffer, None);
                 self.allocator
@@ -358,13 +369,13 @@ impl AllocatorSingleThread {
         todo!()
     }
 
-    pub fn map<F>(&self, handle: ManagedAllocationHandle, f: F) -> VkResult<()>
+    fn map<F>(&self, index: usize, f: F) -> VkResult<()>
     where
         F: FnOnce(*mut u8, &dyn Fn()),
     {
         let alloc = self
             .managed_allocations
-            .get(handle.index)
+            .get(index)
             .expect("index should be between bounds")
             .as_ref()
             .expect("Alloc is destroyed")
@@ -538,7 +549,7 @@ impl AllocatorSingleThread {
 
     pub fn get_device_memory_and_offset(
         &self,
-        ManagedAllocationHandle { index }: ManagedAllocationHandle,
+        ManagedAllocationHandle { index, .. }: ManagedAllocationHandle,
     ) -> (vk::DeviceMemory, u64) {
         let alloc = self
             .managed_allocations
