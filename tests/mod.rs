@@ -1049,10 +1049,14 @@ fn auto_test() {
         );
     }
 
-    for i in 0..(handles.len() / 2) {
-        let handle = handles.remove(i);
-        unsafe { handle.free().unwrap() };
-    }
+    // Lets drop half of the allocations to make some space.
+    // Dropping their handles (this are the only ones since we didn't `copy()` them)
+    // makes them free the resource
+    let mut index = 0;
+    handles.retain(|_| {
+        index += 1;
+        index % 2 == 0
+    });
 
     for _ in 0..8 {
         handles.push(
@@ -1080,8 +1084,12 @@ fn auto_test() {
         let size = handle.size().unwrap() as usize;
         handle
             .map(|pointer, _| {
+                let expected = u128::from_ne_bytes([index as u8; 16]);
                 let slice = unsafe { std::slice::from_raw_parts(pointer, size) };
-                assert!(slice.iter().all(|e| *e == index as u8));
+                for chunk in slice.chunks_exact(16) {
+                    let actual = u128::from_ne_bytes(chunk.try_into().unwrap());
+                    assert_eq!(actual, expected);
+                }
             })
             .unwrap();
         unsafe { handle.free().unwrap() };

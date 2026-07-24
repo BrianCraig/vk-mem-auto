@@ -48,6 +48,7 @@ pub struct ManagedAllocation {
     resource: Resource,
     size: vk::DeviceSize,
     mem_offset: (vk::DeviceMemory, vk::DeviceSize),
+    freed: bool,
 }
 
 impl ManagedAllocation {
@@ -121,14 +122,13 @@ pub enum HandleError {
     DroppedAllocator,
 }
 
+type RcManagedAllocation = Rc<RefCell<ManagedAllocation>>;
+
 #[derive(Clone)]
 pub struct ManagedAllocationHandle {
     allocator: AllocatorHandle,
-    // Maybe should be ManagedBufferHandle and ManagedImageHandle
-    index: usize,
+    rc_ma: RcManagedAllocation,
 }
-
-// static mut REGISTRY: Vec<(Option<NonNull<AllocatorSingleThread>>, u64)> = Vec::new();
 
 impl ManagedAllocationHandle {
     pub(crate) fn inner(&self) -> Result<&ManagedAllocation, HandleError> {
@@ -136,31 +136,41 @@ impl ManagedAllocationHandle {
     }
 
     pub fn size(&self) -> Result<u64, HandleError> {
-        if let Some(ma) = self.allocator.borrow().at(self.index) {
-            Ok(ma.size)
-        } else {
-            Err(HandleError::FreedResource)
+        let ma = self.rc_ma.borrow();
+        match ma.freed {
+            true => Err(HandleError::FreedResource),
+            false => Ok(ma.size),
         }
     }
 
-    pub unsafe fn free(&self) -> VkResult<()> {
-        unsafe { self.allocator.borrow_mut().free(self.index) }
+    pub unsafe fn free(&self) -> Result<(), HandleError> {
+        unsafe { self.allocator.borrow_mut().free(&self.rc_ma) }
     }
 
-    pub fn map<F>(&self, f: F) -> VkResult<()>
+    pub fn map<F>(&self, f: F) -> Result<(), HandleError>
     where
         F: FnOnce(*mut u8, &dyn Fn()),
     {
-        self.allocator.borrow().map(self.index, f)
+        self.allocator.borrow().map(&self.rc_ma, f)
     }
 }
-/// Allocator.
-///
-/// If you need `Send + Sync + Clone`, use [`AllocatorThreadSafe`].
+
+impl Drop for ManagedAllocationHandle {
+    fn drop(&mut self) {
+        // If we are dropping this, this rc_ma and the one on the allocator still exists
+        // That means that this last "user available" handle goes out of scope.
+        // We must free the resource (if still not, checked by the allocator)
+        if Rc::strong_count(&self.rc_ma) == 2 {
+            let _ = unsafe { Self::free(&self) };
+        } else {}
+    }
+}
+
+/// Allocator. Thread-Safe not in scope still.
 pub struct AllocatorSingleThread {
     allocator: crate::Allocator,
     device: ash::Device,
-    managed_allocations: Vec<Option<ManagedAllocation>>,
+    managed_allocations: Vec<RcManagedAllocation>,
     queue: ash::vk::Queue,
     command_buffer: ash::vk::CommandBuffer,
     fence: ash::vk::Fence,
@@ -235,21 +245,12 @@ impl AllocatorSingleThread {
         }
     }
 
-    fn at<'a>(&'a self, index: usize) -> Option<&'a ManagedAllocation> {
-        self.managed_allocations
-            .get(index)
-            .map(|r| r.as_ref())
-            .unwrap_or(None)
-    }
-
     pub fn allocate_buffer(
         &mut self,
         buffer_create_info: vk::BufferCreateInfo<'_>,
         usage: AllocationUsage,
         allocator_handle: AllocatorHandle,
     ) -> VkResult<ManagedAllocationHandle> {
-        // TODO: use first available
-        let index = self.managed_allocations.len();
         let aci = Self::aci(&usage);
         let buffer_create_info = buffer_create_info.usage(
             buffer_create_info
@@ -279,16 +280,19 @@ impl AllocatorSingleThread {
                 .unwrap()
         };
 
-        self.managed_allocations.push(Some(ManagedAllocation {
+        let rc_ma = Rc::new(RefCell::new(ManagedAllocation {
             usage: usage,
             resource: Resource::Buffer(buffer, allocation.get_raw(), buffer_create_info_owned),
             size: allocation_info.size,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
+            freed: false,
         }));
 
+        self.managed_allocations.push(rc_ma.clone());
+
         Ok(ManagedAllocationHandle {
-            index,
             allocator: allocator_handle,
+            rc_ma,
         })
     }
 
@@ -299,8 +303,6 @@ impl AllocatorSingleThread {
 
         allocator_handle: AllocatorHandle,
     ) -> VkResult<ManagedAllocationHandle> {
-        // TODO: use first available
-        let index = self.managed_allocations.len();
         let aci = Self::aci(&usage);
         let image_create_info = image_create_info.usage(
             image_create_info
@@ -322,30 +324,31 @@ impl AllocatorSingleThread {
                 .unwrap()
         };
 
-        self.managed_allocations.push(Some(ManagedAllocation {
+        let rc_ma = Rc::new(RefCell::new(ManagedAllocation {
             usage: usage,
             resource: Resource::Image(image, allocation.get_raw(), image_create_info_owned),
             size: allocation_info.size,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
+            freed: false,
         }));
 
+        self.managed_allocations.push(rc_ma.clone());
+
         Ok(ManagedAllocationHandle {
-            index,
             allocator: allocator_handle,
+            rc_ma,
         })
     }
 
     /// Destroys the Buffer/Image associated with it.
     ///
     /// You must ensure that the Resource associated with it is not being used
-    unsafe fn free(&mut self, index: usize) -> VkResult<()> {
-        self.managed_allocations
-            .get(index)
-            .expect("index should be between bounds")
-            .as_ref()
-            .expect("Alloc is destroyed");
-        // TODO: do checks of generation and allocator id.
-        match &(self.managed_allocations[index].take().unwrap().resource) {
+    unsafe fn free(&mut self, rc_ma: &RcManagedAllocation) -> Result<(), HandleError> {
+        let mut ma = rc_ma.borrow_mut();
+        if ma.freed {
+            return Err(HandleError::FreedResource);
+        }
+        match &ma.resource {
             Resource::Buffer(buffer, allocation, _) => {
                 self.device.destroy_buffer(*buffer, None);
                 self.allocator
@@ -357,6 +360,7 @@ impl AllocatorSingleThread {
                     .free_memory(&mut crate::Allocation::from_raw(*allocation));
             }
         }
+        ma.freed = true;
         Ok(())
     }
 
@@ -369,18 +373,15 @@ impl AllocatorSingleThread {
         todo!()
     }
 
-    fn map<F>(&self, index: usize, f: F) -> VkResult<()>
+    fn map<F>(&self, rc_ma: &RcManagedAllocation, f: F) -> Result<(), HandleError>
     where
         F: FnOnce(*mut u8, &dyn Fn()),
     {
-        let alloc = self
-            .managed_allocations
-            .get(index)
-            .expect("index should be between bounds")
-            .as_ref()
-            .expect("Alloc is destroyed")
-            .get_vma_alloc();
-        let mut crate_alloc = unsafe { Allocation::from_raw(alloc) };
+        let ma = rc_ma.borrow();
+        if ma.freed {
+            return Err(HandleError::FreedResource);
+        }
+        let mut crate_alloc = unsafe { Allocation::from_raw(ma.get_vma_alloc()) };
         let pointer = unsafe { self.allocator.map_memory(&mut crate_alloc) }.unwrap();
         let crate::AllocationInfo {
             device_memory,
@@ -412,6 +413,9 @@ impl AllocatorSingleThread {
     /// You **must** ensure that all the movable resources are not being used, since destroying a
     /// resource (buffer/image) in vulkan while being used is UB.
     pub unsafe fn defrag(&mut self) {
+        self.managed_allocations
+            .retain(|rc_ma| !rc_ma.borrow().freed);
+
         let ctx = unsafe {
             self.allocator
                 .begin_defragmentation(&crate::DefragmentationInfo::default())
@@ -431,22 +435,14 @@ impl AllocatorSingleThread {
                 let source_info = self.allocator.get_allocation_info(&mv.source);
                 let destination_info = self.allocator.get_allocation_info(&mv.destination);
 
-                let index = self
+                let rc_ma = self
                     .managed_allocations
                     .iter()
-                    .position(|x: &Option<ManagedAllocation>| {
-                        x.as_ref()
-                            .is_some_and(|x| x.get_vma_alloc() == mv.source.get_raw())
-                    })
-                    .unwrap();
-                let mut man_alloc = self
-                    .managed_allocations
-                    .get(index)
-                    .unwrap()
-                    .clone()
-                    .take()
-                    .unwrap();
-                man_alloc.resource = match man_alloc.resource {
+                    .find(|x| x.borrow().get_vma_alloc() == mv.source.get_raw())
+                    .expect("vk_mem_auto U01");
+
+                let mut ma = rc_ma.borrow_mut();
+                ma.resource = match ma.resource {
                     Resource::Buffer(buffer, alloc, bcio) => Resource::Buffer(
                         unsafe {
                             destroy_buffers.push(buffer);
@@ -520,8 +516,6 @@ impl AllocatorSingleThread {
                         icio,
                     ),
                 };
-
-                self.managed_allocations[index] = Some(man_alloc);
             }
             unsafe {
                 self.device.end_command_buffer(self.command_buffer).unwrap();
@@ -545,23 +539,6 @@ impl AllocatorSingleThread {
                 }
             }
         }) {}
-    }
-
-    pub fn get_device_memory_and_offset(
-        &self,
-        ManagedAllocationHandle { index, .. }: ManagedAllocationHandle,
-    ) -> (vk::DeviceMemory, u64) {
-        let alloc = self
-            .managed_allocations
-            .get(index)
-            .expect("index should be between bounds")
-            .as_ref()
-            .expect("Alloc is destroyed")
-            .get_vma_alloc();
-        let info = self
-            .allocator
-            .get_allocation_info(&unsafe { Allocation::from_raw(alloc) });
-        (info.device_memory, info.offset)
     }
 }
 
