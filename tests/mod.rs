@@ -1076,9 +1076,7 @@ fn auto_test() {
         .enumerate()
         .for_each(|(index, handle)| map_and_write(handle, index as u8));
 
-    unsafe {
-        allocator.defrag();
-    }
+    println!("defrag pass stats: {:?}", unsafe { allocator.defrag() });
 
     for (index, handle) in handles.iter().enumerate() {
         let size = handle.size().unwrap() as usize;

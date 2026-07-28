@@ -7,7 +7,7 @@ use std::rc::Rc;
 use ash::prelude::VkResult;
 use ash::vk::{self, BufferCreateInfo, ImageCreateInfo};
 
-use crate::{Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo};
+use crate::{Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo, DefragmentationStats};
 
 #[derive(Clone)]
 pub enum AllocationUsage {
@@ -111,7 +111,7 @@ impl AllocatorHandle {
             .allocate_image(image_create_info, usage, self.clone())
     }
 
-    pub unsafe fn defrag(&mut self) {
+    pub unsafe fn defrag(&mut self) -> DefragmentationStats{
         self.0.borrow_mut().defrag()
     }
 }
@@ -412,7 +412,7 @@ impl AllocatorSingleThread {
     ///
     /// You **must** ensure that all the movable resources are not being used, since destroying a
     /// resource (buffer/image) in vulkan while being used is UB.
-    pub unsafe fn defrag(&mut self) {
+    pub unsafe fn defrag(&mut self)  -> DefragmentationStats{
         self.managed_allocations
             .retain(|rc_ma| !rc_ma.borrow().freed);
 
@@ -516,6 +516,7 @@ impl AllocatorSingleThread {
                         icio,
                     ),
                 };
+                ma.mem_offset = (destination_info.device_memory, destination_info.offset);
             }
             unsafe {
                 self.device.end_command_buffer(self.command_buffer).unwrap();
@@ -539,6 +540,7 @@ impl AllocatorSingleThread {
                 }
             }
         }) {}
+        ctx.end()
     }
 }
 
