@@ -9,7 +9,7 @@ use std::ops::{BitOr, Deref};
 use std::rc::Rc;
 
 use ash::prelude::VkResult;
-use ash::vk::{self, BufferCreateInfo, ImageCreateInfo};
+use ash::vk;
 
 use crate::{
     Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo, DefragmentationStats,
@@ -51,10 +51,9 @@ pub type MemorySelector = fn(MemorySelectorInfo) -> MemorySelection;
 
 #[derive(Clone)]
 pub struct ManagedAllocation {
-    usage: AllocationUsage,
+    _usage: AllocationUsage,
     resource: Resource,
     hints: ResourceRequirementHints,
-    size: vk::DeviceSize,
     mem_offset: (vk::DeviceMemory, vk::DeviceSize),
     freed: bool,
 }
@@ -64,19 +63,6 @@ impl ManagedAllocation {
         match self.resource {
             Resource::Buffer(_, pointer, _) => pointer,
             Resource::Image(_, pointer, _) => pointer,
-        }
-    }
-
-    fn get_bci<'a>(&self) -> BufferCreateInfo<'a> {
-        match self.resource {
-            Resource::Buffer(_, _, bcio) => (&bcio).into(),
-            Resource::Image(_, _, _) => panic!(),
-        }
-    }
-    fn get_ici<'a>(&self) -> ImageCreateInfo<'a> {
-        match self.resource {
-            Resource::Buffer(_, _, _) => panic!(),
-            Resource::Image(_, _, icio) => (&icio).into(),
         }
     }
 }
@@ -139,15 +125,11 @@ pub struct ManagedAllocationHandle {
 }
 
 impl ManagedAllocationHandle {
-    pub(crate) fn inner(&self) -> Result<&ManagedAllocation, HandleError> {
-        Err(HandleError::FreedResource)
-    }
-
     pub fn size(&self) -> Result<u64, HandleError> {
         let ma = self.rc_ma.borrow();
         match ma.freed {
             true => Err(HandleError::FreedResource),
-            false => Ok(ma.size),
+            false => Ok(ma.hints.size),
         }
     }
 
@@ -160,6 +142,10 @@ impl ManagedAllocationHandle {
         F: FnOnce(*mut u8, &dyn Fn()),
     {
         self.allocator.borrow().map(&self.rc_ma, f)
+    }
+
+    pub fn resource_hints(&self) -> ResourceRequirementHints {
+        self.rc_ma.borrow().hints
     }
 }
 
@@ -385,10 +371,9 @@ impl AllocatorSingleThread {
         };
 
         let rc_ma = Rc::new(RefCell::new(ManagedAllocation {
-            usage: usage,
+            _usage: usage,
             resource: Resource::Buffer(buffer, allocation.get_raw(), buffer_create_info_owned),
             hints,
-            size: allocation_info.size,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
             freed: false,
         }));
@@ -431,10 +416,9 @@ impl AllocatorSingleThread {
         };
 
         let rc_ma = Rc::new(RefCell::new(ManagedAllocation {
-            usage: usage,
+            _usage: usage,
             resource: Resource::Image(image, allocation.get_raw(), image_create_info_owned),
             hints,
-            size: allocation_info.size,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
             freed: false,
         }));
@@ -469,15 +453,6 @@ impl AllocatorSingleThread {
         }
         ma.freed = true;
         Ok(())
-    }
-
-    /// Why from a handle? Implementation should be in ManagedAllocation(&self), handle must only search it in alloc and call.
-    pub fn get_buffer(&self, handle: ManagedAllocationHandle) -> VkResult<vk::Buffer> {
-        todo!()
-    }
-
-    pub fn get_image(&self, handle: ManagedAllocationHandle) -> VkResult<vk::Image> {
-        todo!()
     }
 
     fn map<F>(&self, rc_ma: &RcManagedAllocation, f: F) -> Result<(), HandleError>
