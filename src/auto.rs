@@ -1,13 +1,20 @@
 mod ash_owned;
 
+use ash::khr::{dedicated_allocation, get_memory_requirements2};
+use bitflags::bitflags;
+
 use std::cell::RefCell;
+use std::ffi::CStr;
 use std::ops::{BitOr, Deref};
 use std::rc::Rc;
 
 use ash::prelude::VkResult;
 use ash::vk::{self, BufferCreateInfo, ImageCreateInfo};
 
-use crate::{Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo, DefragmentationStats};
+use crate::{
+    Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo, DefragmentationStats,
+    ResourceRequirementHints,
+};
 
 #[derive(Clone)]
 pub enum AllocationUsage {
@@ -46,6 +53,7 @@ pub type MemorySelector = fn(MemorySelectorInfo) -> MemorySelection;
 pub struct ManagedAllocation {
     usage: AllocationUsage,
     resource: Resource,
+    hints: ResourceRequirementHints,
     size: vk::DeviceSize,
     mem_offset: (vk::DeviceMemory, vk::DeviceSize),
     freed: bool,
@@ -167,6 +175,20 @@ impl Drop for ManagedAllocationHandle {
     }
 }
 
+enum BufferOrImage {
+    Buffer(vk::Buffer),
+    Image(vk::Image),
+}
+
+bitflags! {
+    #[repr(transparent)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct Extensions: u32 {
+        const VK_KHR_get_memory_requirements2 = 0b00000001;
+        const VK_KHR_dedicated_allocation = 0b00000010;
+    }
+}
+
 /// Allocator. Thread-Safe not in scope still.
 pub struct AllocatorSingleThread {
     allocator: crate::Allocator,
@@ -175,6 +197,8 @@ pub struct AllocatorSingleThread {
     queue: ash::vk::Queue,
     command_buffer: ash::vk::CommandBuffer,
     fence: ash::vk::Fence,
+    api_version: u32,
+    extensions: Extensions,
 }
 
 impl AllocatorSingleThread {
@@ -185,6 +209,27 @@ impl AllocatorSingleThread {
         queue: ash::vk::Queue,
         command_pool: ash::vk::CommandPool,
     ) -> AllocatorHandle {
+        let api_version = unsafe {
+            instance
+                .get_physical_device_properties(physical_device)
+                .api_version
+        };
+        let extensions = unsafe {
+            let phy_extensions = instance
+                .enumerate_device_extension_properties(physical_device)
+                .unwrap();
+            let has_extension = |looked: &CStr| {
+                phy_extensions.iter().any(|extension| {
+                    std::ffi::CStr::from_ptr(extension.extension_name.as_ptr()) == looked
+                })
+            };
+            has_extension(&get_memory_requirements2::NAME)
+                .then_some(Extensions::VK_KHR_get_memory_requirements2)
+                .unwrap_or_default()
+                | has_extension(&dedicated_allocation::NAME)
+                    .then_some(Extensions::VK_KHR_dedicated_allocation)
+                    .unwrap_or_default()
+        };
         let create_info = crate::AllocatorCreateInfo::new(instance, device, physical_device);
         let allocator = unsafe { crate::Allocator::new(create_info).unwrap() };
         let command_buffer = unsafe {
@@ -210,6 +255,8 @@ impl AllocatorSingleThread {
             queue,
             command_buffer,
             fence,
+            api_version,
+            extensions,
         }
         .into()
     }
@@ -246,6 +293,60 @@ impl AllocatorSingleThread {
         }
     }
 
+    fn get_hints(&self, resource: BufferOrImage) -> ResourceRequirementHints {
+        if self.api_version >= vk::make_api_version(0, 1, 1, 0)
+            || (self.extensions.contains(
+                Extensions::VK_KHR_dedicated_allocation
+                    | Extensions::VK_KHR_get_memory_requirements2,
+            ))
+        {
+            let mut dedicated = vk::MemoryDedicatedRequirements::default();
+            let mut mem_req2 = vk::MemoryRequirements2::default().push_next(&mut dedicated);
+            match resource {
+                BufferOrImage::Buffer(buffer) => {
+                    let info_buffer = vk::BufferMemoryRequirementsInfo2::default().buffer(buffer);
+
+                    unsafe {
+                        self.device
+                            .get_buffer_memory_requirements2(&info_buffer, &mut mem_req2);
+                    }
+                }
+                BufferOrImage::Image(image) => {
+                    let info_image = vk::ImageMemoryRequirementsInfo2::default().image(image);
+
+                    unsafe {
+                        self.device
+                            .get_image_memory_requirements2(&info_image, &mut mem_req2);
+                    }
+                }
+            }
+
+            ResourceRequirementHints {
+                size: mem_req2.memory_requirements.size,
+                alignment: mem_req2.memory_requirements.alignment,
+                memory_type_bits: mem_req2.memory_requirements.memory_type_bits,
+                prefers_dedicated_allocation: dedicated.prefers_dedicated_allocation == vk::TRUE,
+                requires_dedicated_allocation: dedicated.requires_dedicated_allocation == vk::TRUE,
+            }
+        } else {
+            let mem_req = unsafe {
+                match resource {
+                    BufferOrImage::Buffer(buffer) => {
+                        self.device.get_buffer_memory_requirements(buffer)
+                    }
+                    BufferOrImage::Image(image) => self.device.get_image_memory_requirements(image),
+                }
+            };
+            ResourceRequirementHints {
+                size: mem_req.size,
+                alignment: mem_req.alignment,
+                memory_type_bits: mem_req.memory_type_bits,
+                prefers_dedicated_allocation: false,
+                requires_dedicated_allocation: false,
+            }
+        }
+    }
+
     pub fn allocate_buffer(
         &mut self,
         buffer_create_info: vk::BufferCreateInfo<'_>,
@@ -265,6 +366,8 @@ impl AllocatorSingleThread {
                 .create_buffer(&buffer_create_info, None)
                 .unwrap()
         };
+
+        let hints = self.get_hints(BufferOrImage::Buffer(buffer));
         let allocation = unsafe {
             self.allocator
                 .allocate_memory_for_buffer(buffer, &aci)
@@ -284,6 +387,7 @@ impl AllocatorSingleThread {
         let rc_ma = Rc::new(RefCell::new(ManagedAllocation {
             usage: usage,
             resource: Resource::Buffer(buffer, allocation.get_raw(), buffer_create_info_owned),
+            hints,
             size: allocation_info.size,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
             freed: false,
@@ -313,6 +417,7 @@ impl AllocatorSingleThread {
         let image_create_info_owned = image_create_info.try_into().unwrap();
 
         let image = unsafe { self.device.create_image(&image_create_info, None).unwrap() };
+        let hints = self.get_hints(BufferOrImage::Image(image));
         let allocation = unsafe {
             self.allocator
                 .allocate_memory_for_image(image, &aci)
@@ -328,6 +433,7 @@ impl AllocatorSingleThread {
         let rc_ma = Rc::new(RefCell::new(ManagedAllocation {
             usage: usage,
             resource: Resource::Image(image, allocation.get_raw(), image_create_info_owned),
+            hints,
             size: allocation_info.size,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
             freed: false,

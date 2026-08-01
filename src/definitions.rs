@@ -1,6 +1,6 @@
 use crate::ffi::{self};
-use ash::vk;
 use ash::vk::PhysicalDevice;
+use ash::vk::{self, DeviceSize};
 use ash::{Device, Instance};
 use bitflags::bitflags;
 use std::marker::PhantomData;
@@ -856,4 +856,22 @@ impl From<VirtualAllocationCreateInfo> for ffi::VmaVirtualAllocationCreateInfo {
     fn from(info: VirtualAllocationCreateInfo) -> Self {
         (&info).into()
     }
+}
+
+/// Requirements determined by vulkan based from the Resource (Buffer or Image).
+/// Gotten from VkMemoryRequirements2 and VkMemoryDedicatedRequirements.
+///
+/// This does not directly determine alignment / selected memory / dedicated resource.
+/// TODO: should be public or just for the testing suite / debug info?  
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceRequirementHints {
+    pub size: DeviceSize,
+    pub alignment: DeviceSize,
+    /// bitmask of which `vkMemoryType` this resource can be stored in.
+    /// TODO: make this useful, might be a [&MemoryType]
+    pub memory_type_bits: u32,
+    /// Vulkan determined that is preferred to put this resource in a dedicated alloc. false if VK<1.1.
+    pub prefers_dedicated_allocation: bool,
+    /// Vulkan determined that this resource should be in a dedicated alloc. false if VK<1.1.
+    pub requires_dedicated_allocation: bool,
 }
