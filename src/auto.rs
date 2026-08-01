@@ -111,7 +111,7 @@ impl AllocatorHandle {
             .allocate_image(image_create_info, usage, self.clone())
     }
 
-    pub unsafe fn defrag(&mut self) -> DefragmentationStats{
+    pub unsafe fn defrag(&mut self) -> DefragmentationStats {
         self.0.borrow_mut().defrag()
     }
 }
@@ -162,7 +162,8 @@ impl Drop for ManagedAllocationHandle {
         // We must free the resource (if still not, checked by the allocator)
         if Rc::strong_count(&self.rc_ma) == 2 {
             let _ = unsafe { Self::free(&self) };
-        } else {}
+        } else {
+        }
     }
 }
 
@@ -412,7 +413,7 @@ impl AllocatorSingleThread {
     ///
     /// You **must** ensure that all the movable resources are not being used, since destroying a
     /// resource (buffer/image) in vulkan while being used is UB.
-    pub unsafe fn defrag(&mut self)  -> DefragmentationStats{
+    pub unsafe fn defrag(&mut self) -> DefragmentationStats {
         self.managed_allocations
             .retain(|rc_ma| !rc_ma.borrow().freed);
 
@@ -482,6 +483,44 @@ impl AllocatorSingleThread {
                                     destination_info.offset,
                                 )
                                 .unwrap();
+                            let barrier_from = vk::ImageMemoryBarrier::default()
+                                .src_access_mask(vk::AccessFlags::NONE)
+                                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                                .src_queue_family_index(0)
+                                .dst_queue_family_index(0)
+                                .old_layout(ici.initial_layout)
+                                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                                .image(image)
+                                .subresource_range(
+                                    vk::ImageSubresourceRange::default()
+                                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                        .level_count(vk::REMAINING_MIP_LEVELS)
+                                        .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                                );
+                            let barrier_to = vk::ImageMemoryBarrier::default()
+                                .src_access_mask(vk::AccessFlags::NONE)
+                                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                                .src_queue_family_index(0)
+                                .dst_queue_family_index(0)
+                                .old_layout(ici.initial_layout)
+                                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                                .image(new_image)
+                                .subresource_range(
+                                    vk::ImageSubresourceRange::default()
+                                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                        .level_count(vk::REMAINING_MIP_LEVELS)
+                                        .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                                );
+
+                            self.device.cmd_pipeline_barrier(
+                                self.command_buffer,
+                                vk::PipelineStageFlags::ALL_GRAPHICS,
+                                vk::PipelineStageFlags::TRANSFER,
+                                vk::DependencyFlags::BY_REGION,
+                                &[],
+                                &[],
+                                &[barrier_from, barrier_to],
+                            );
                             self.device.cmd_copy_image(
                                 self.command_buffer,
                                 image,
@@ -509,6 +548,30 @@ impl AllocatorSingleThread {
                                         depth: ici.extent.depth,
                                     },
                                 }),
+                            );
+                            let revert = vk::ImageMemoryBarrier::default()
+                                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                                .dst_access_mask(vk::AccessFlags::NONE)
+                                .src_queue_family_index(0)
+                                .dst_queue_family_index(0)
+                                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                                .new_layout(ici.initial_layout)
+                                .image(new_image)
+                                .subresource_range(
+                                    vk::ImageSubresourceRange::default()
+                                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                        .level_count(vk::REMAINING_MIP_LEVELS)
+                                        .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                                );
+
+                            self.device.cmd_pipeline_barrier(
+                                self.command_buffer,
+                                vk::PipelineStageFlags::TRANSFER,
+                                vk::PipelineStageFlags::ALL_GRAPHICS,
+                                vk::DependencyFlags::BY_REGION,
+                                &[],
+                                &[],
+                                &[revert],
                             );
                             new_image
                         },

@@ -1114,3 +1114,132 @@ fn handle_incorrect_handlers_usage() {
 
     assert_eq!(handle.size(), Err(vk_mem::HandleError::FreedResource));
 }
+
+#[test]
+fn upload_move_image() {
+    let harness = TestHarness::new();
+    let mut allocator = harness.create_allocator_single_thread();
+
+    let _first_image: ManagedAllocationHandle = allocator
+        .allocate_image(
+            ica_linear_1024_1024_rgba8(),
+            vk_mem::AllocationUsage::Readback,
+        )
+        .unwrap();
+
+    let second_image: ManagedAllocationHandle = allocator
+        .allocate_image(
+            ica_linear_1024_1024_rgba8(),
+            vk_mem::AllocationUsage::Readback,
+        )
+        .unwrap();
+
+    let _image = allocator
+        .allocate_image(
+            ica_linear_1024_1024_rgba8(),
+            vk_mem::AllocationUsage::Readback,
+        )
+        .unwrap();
+
+    drop(second_image);
+
+    println!("defrag pass stats: {:?}", unsafe { allocator.defrag() });
+}
+
+fn ica_linear_1024_1024_rgba8<'a>() -> vk::ImageCreateInfo<'a> {
+    vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .array_layers(1)
+        .mip_levels(1)
+        .extent(vk::Extent3D {
+            width: 1024,
+            height: 1024,
+            depth: 1,
+        })
+        .format(vk::Format::R8G8B8A8_SRGB)
+        .initial_layout(vk::ImageLayout::PREINITIALIZED)
+        .tiling(vk::ImageTiling::LINEAR)
+        .samples(vk::SampleCountFlags::TYPE_1)
+}
+
+#[test]
+fn requries_test() {
+    let harness = TestHarness::new();
+
+    let mut dedicated = vk::MemoryDedicatedRequirements::default();
+    let mut dedicated_image = vk::MemoryDedicatedRequirements::default();
+
+    let mut mem_req2 = vk::MemoryRequirements2::default().push_next(&mut dedicated);
+    let mut mem_req2_image = vk::MemoryRequirements2::default().push_next(&mut dedicated_image);
+
+    let buffer = unsafe {
+        harness
+            .device
+            .create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(1024 * 1024 * 1024 * 1024)
+                    .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
+                None,
+            )
+            .unwrap()
+    };
+
+    let image = unsafe {
+        harness
+            .device
+            .create_image(
+                &(ica_linear_1024_1024_rgba8()
+                    .array_layers(32)
+                    .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)),
+                None,
+            )
+            .unwrap()
+    };
+
+    let info = vk::BufferMemoryRequirementsInfo2::default().buffer(buffer);
+
+    let info_image = vk::ImageMemoryRequirementsInfo2::default().image(image);
+
+    unsafe {
+        harness
+            .device
+            .get_buffer_memory_requirements2(&info, &mut mem_req2);
+        harness
+            .device
+            .get_image_memory_requirements2(&info_image, &mut mem_req2_image);
+    }
+
+    println!(
+        "size: {}, alignment: {}, memory_bits: {:b}",
+        mem_req2.memory_requirements.size,
+        mem_req2.memory_requirements.alignment,
+        mem_req2.memory_requirements.memory_type_bits
+    );
+    println!(
+        "prefers: {}",
+        dedicated.prefers_dedicated_allocation == vk::TRUE
+    );
+    println!(
+        "requires: {}",
+        dedicated.requires_dedicated_allocation == vk::TRUE
+    );
+
+    println!(
+        "size: {}, alignment: {}, memory_bits: {:b}",
+        mem_req2_image.memory_requirements.size,
+        mem_req2_image.memory_requirements.alignment,
+        mem_req2_image.memory_requirements.memory_type_bits
+    );
+    println!(
+        "prefers: {}",
+        dedicated_image.prefers_dedicated_allocation == vk::TRUE
+    );
+    println!(
+        "requires: {}",
+        dedicated_image.requires_dedicated_allocation == vk::TRUE
+    );
+    unsafe {
+        harness.device.destroy_buffer(buffer, None);
+        harness.device.destroy_image(image, None);
+    }
+}
