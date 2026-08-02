@@ -1,4 +1,5 @@
 mod ash_owned;
+mod config;
 
 use ash::khr::{dedicated_allocation, get_memory_requirements2};
 use bitflags::bitflags;
@@ -11,24 +12,13 @@ use std::rc::Rc;
 use ash::prelude::VkResult;
 use ash::vk;
 
+use self::config::AllocationConfig;
+pub use self::config::AllocationUsage;
+
 use crate::{
     Alloc, Allocation, AllocationCreateFlags, AllocationCreateInfo, DefragmentationStats,
     ResourceRequirementHints,
 };
-
-#[derive(Clone)]
-pub enum AllocationUsage {
-    /// Fastest memory for GPU-only resources. Usually can't be Mapped.
-    GpuOnly,
-    /// CPU writes, GPU reads. Can be Mapped.
-    Upload,
-    /// GPU writes, CPU reads. Can be Mapped.
-    Readback,
-    /// CPU-owned memory. Can be Mapped.
-    Cpu,
-    /// User-defined memory selection.
-    Custom(MemorySelector),
-}
 
 #[derive(Clone)]
 pub enum Resource {
@@ -44,14 +34,8 @@ pub enum Resource {
     ),
 }
 
-// stub
-type MemorySelectorInfo = u64;
-type MemorySelection = u64;
-pub type MemorySelector = fn(MemorySelectorInfo) -> MemorySelection;
-
-#[derive(Clone)]
 pub struct ManagedAllocation {
-    _usage: AllocationUsage,
+    _config: AllocationConfig,
     resource: Resource,
     hints: ResourceRequirementHints,
     mem_offset: (vk::DeviceMemory, vk::DeviceSize),
@@ -88,21 +72,21 @@ impl AllocatorHandle {
     pub fn allocate_buffer(
         &self,
         buffer_create_info: vk::BufferCreateInfo<'_>,
-        usage: AllocationUsage,
+        config: impl Into<AllocationConfig>,
     ) -> VkResult<ManagedAllocationHandle> {
         self.0
             .borrow_mut()
-            .allocate_buffer(buffer_create_info, usage, self.clone())
+            .allocate_buffer(buffer_create_info, config.into(), self.clone())
     }
 
     pub fn allocate_image(
         &self,
         image_create_info: vk::ImageCreateInfo<'_>,
-        usage: AllocationUsage,
+        config: impl Into<AllocationConfig>,
     ) -> VkResult<ManagedAllocationHandle> {
         self.0
             .borrow_mut()
-            .allocate_image(image_create_info, usage, self.clone())
+            .allocate_image(image_create_info, config.into(), self.clone())
     }
 
     pub unsafe fn defrag(&mut self) -> DefragmentationStats {
@@ -336,10 +320,10 @@ impl AllocatorSingleThread {
     pub fn allocate_buffer(
         &mut self,
         buffer_create_info: vk::BufferCreateInfo<'_>,
-        usage: AllocationUsage,
+        config: AllocationConfig,
         allocator_handle: AllocatorHandle,
     ) -> VkResult<ManagedAllocationHandle> {
-        let aci = Self::aci(&usage);
+        let aci = Self::aci(&config.usage);
         let buffer_create_info = buffer_create_info.usage(
             buffer_create_info
                 .usage
@@ -371,7 +355,7 @@ impl AllocatorSingleThread {
         };
 
         let rc_ma = Rc::new(RefCell::new(ManagedAllocation {
-            _usage: usage,
+            _config: config,
             resource: Resource::Buffer(buffer, allocation.get_raw(), buffer_create_info_owned),
             hints,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
@@ -389,11 +373,10 @@ impl AllocatorSingleThread {
     pub fn allocate_image(
         &mut self,
         image_create_info: vk::ImageCreateInfo<'_>,
-        usage: AllocationUsage,
-
+        config: AllocationConfig,
         allocator_handle: AllocatorHandle,
     ) -> VkResult<ManagedAllocationHandle> {
-        let aci = Self::aci(&usage);
+        let aci = Self::aci(&config.usage);
         let image_create_info = image_create_info.usage(
             image_create_info
                 .usage
@@ -416,7 +399,7 @@ impl AllocatorSingleThread {
         };
 
         let rc_ma = Rc::new(RefCell::new(ManagedAllocation {
-            _usage: usage,
+            _config: config,
             resource: Resource::Image(image, allocation.get_raw(), image_create_info_owned),
             hints,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
