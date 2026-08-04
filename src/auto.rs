@@ -283,9 +283,9 @@ impl AllocatorSingleThread {
             },
             AllocationUsage::Readback => crate::AllocationCreateInfo {
                 flags: AllocationCreateFlags::HOST_ACCESS_RANDOM,
-                required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
-                preferred_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL
+                required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
                     | vk::MemoryPropertyFlags::HOST_CACHED,
+                preferred_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 ..Default::default()
             },
             AllocationUsage::Cpu => crate::AllocationCreateInfo {
@@ -626,7 +626,7 @@ impl AllocatorSingleThread {
 
                                 self.device.cmd_pipeline_barrier(
                                     self.command_buffer,
-                                    vk::PipelineStageFlags::ALL_COMMANDS,
+                                    vk::PipelineStageFlags::HOST | vk::PipelineStageFlags::TRANSFER,
                                     vk::PipelineStageFlags::TRANSFER,
                                     vk::DependencyFlags::empty(),
                                     &[],
@@ -679,7 +679,7 @@ impl AllocatorSingleThread {
                                 self.device.cmd_pipeline_barrier(
                                     self.command_buffer,
                                     vk::PipelineStageFlags::TRANSFER,
-                                    vk::PipelineStageFlags::ALL_COMMANDS,
+                                    vk::PipelineStageFlags::HOST | vk::PipelineStageFlags::TRANSFER,
                                     vk::DependencyFlags::BY_REGION,
                                     &[],
                                     &[],

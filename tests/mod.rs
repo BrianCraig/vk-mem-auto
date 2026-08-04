@@ -1122,15 +1122,24 @@ fn upload_move_image() {
 
     // We use _first_image since using _ would mean it is dropped instantly, this way its dropped at the end of the test
     let _first_image: ManagedAllocationHandle = allocator
-        .allocate_image(ica_linear_1024_1024_rgba8(), vk_mem::AllocationUsage::Cpu)
+        .allocate_image(
+            ica_linear_1024_1024_rgba8(),
+            vk_mem::AllocationUsage::Readback,
+        )
         .unwrap();
 
     let second_image: ManagedAllocationHandle = allocator
-        .allocate_image(ica_linear_1024_1024_rgba8(), vk_mem::AllocationUsage::Cpu)
+        .allocate_image(
+            ica_linear_1024_1024_rgba8(),
+            vk_mem::AllocationUsage::Readback,
+        )
         .unwrap();
 
     let third_image = allocator
-        .allocate_image(ica_linear_1024_1024_rgba8(), vk_mem::AllocationUsage::Cpu)
+        .allocate_image(
+            ica_linear_1024_1024_rgba8(),
+            vk_mem::AllocationUsage::Readback,
+        )
         .unwrap();
 
     fill_image(&third_image, 0xfafafaff);
@@ -1219,10 +1228,10 @@ fn assert_image(handle: &ManagedAllocationHandle, value: u32) {
     let size = handle.size().unwrap() as usize;
     let count = size / 4;
     let _ = handle.map(|pointer, _| unsafe {
-        assert!(std::slice::from_raw_parts_mut(pointer.cast::<u32>(), count)
+        assert!(std::slice::from_raw_parts(pointer.cast::<u32>(), count)
+            .to_vec()
             .iter()
-            .copied()
-            .all(|e| e == value));
+            .all(|e| *e == value));
     });
 }
 
@@ -1252,7 +1261,7 @@ fn hints_test() {
             vk::BufferCreateInfo::default()
                 .size(1024 * 1024 * 256)
                 .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
-            vk_mem::AllocationUsage::Cpu,
+            vk_mem::AllocationUsage::Readback,
         )
         .unwrap();
 
