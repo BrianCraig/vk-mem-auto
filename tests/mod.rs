@@ -1120,30 +1120,110 @@ fn upload_move_image() {
     let harness = TestHarness::new();
     let mut allocator = harness.create_allocator_single_thread();
 
+    // We use _first_image since using _ would mean it is dropped instantly, this way its dropped at the end of the test
     let _first_image: ManagedAllocationHandle = allocator
-        .allocate_image(
-            ica_linear_1024_1024_rgba8(),
-            vk_mem::AllocationUsage::Readback,
-        )
+        .allocate_image(ica_linear_1024_1024_rgba8(), vk_mem::AllocationUsage::Cpu)
         .unwrap();
 
     let second_image: ManagedAllocationHandle = allocator
-        .allocate_image(
-            ica_linear_1024_1024_rgba8(),
-            vk_mem::AllocationUsage::Readback,
-        )
+        .allocate_image(ica_linear_1024_1024_rgba8(), vk_mem::AllocationUsage::Cpu)
         .unwrap();
 
-    let _image = allocator
-        .allocate_image(
-            ica_linear_1024_1024_rgba8(),
-            vk_mem::AllocationUsage::Readback,
-        )
+    let third_image = allocator
+        .allocate_image(ica_linear_1024_1024_rgba8(), vk_mem::AllocationUsage::Cpu)
         .unwrap();
+
+    fill_image(&third_image, 0xfafafaff);
+
+    assert_image(&third_image, 0xfafafaff);
+
+    transition_image(&harness, &third_image, vk::ImageLayout::GENERAL);
+
+    assert_image(&third_image, 0xfafafaff);
 
     drop(second_image);
 
     println!("defrag pass stats: {:?}", unsafe { allocator.defrag() });
+
+    assert_image(&third_image, 0xfafafaff);
+}
+
+fn transition_image(
+    harness: &TestHarness,
+    handle: &ManagedAllocationHandle,
+    new_layout: vk::ImageLayout,
+) {
+    unsafe {
+        harness
+            .device
+            .begin_command_buffer(
+                harness.command_buffer,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .unwrap();
+        let barrier = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .old_layout(handle.current_layout().unwrap())
+            .new_layout(new_layout)
+            .image(handle.get_image().unwrap())
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .level_count(vk::REMAINING_MIP_LEVELS)
+                    .layer_count(vk::REMAINING_ARRAY_LAYERS),
+            );
+        harness.device.cmd_pipeline_barrier(
+            harness.command_buffer,
+            vk::PipelineStageFlags::ALL_COMMANDS,
+            vk::PipelineStageFlags::ALL_COMMANDS,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier],
+        );
+        harness
+            .device
+            .end_command_buffer(harness.command_buffer)
+            .unwrap();
+        harness
+            .device
+            .queue_submit(
+                harness.queue,
+                &[vk::SubmitInfo::default()
+                    .command_buffers(std::slice::from_ref(&harness.command_buffer))],
+                harness.fence,
+            )
+            .unwrap();
+        harness
+            .device
+            .wait_for_fences(&[harness.fence], true, 1000000000)
+            .unwrap();
+        harness.device.reset_fences(&[harness.fence]).unwrap();
+    }
+    handle.set_layout(new_layout).unwrap();
+}
+
+fn fill_image(handle: &ManagedAllocationHandle, value: u32) {
+    let size = handle.size().unwrap() as usize;
+    let _ = handle.map(|pointer, flush| unsafe {
+        std::slice::from_raw_parts_mut(pointer.cast::<u32>(), size / 4).fill(value);
+        flush();
+    });
+}
+
+fn assert_image(handle: &ManagedAllocationHandle, value: u32) {
+    let size = handle.size().unwrap() as usize;
+    let count = size / 4;
+    let _ = handle.map(|pointer, _| unsafe {
+        assert!(std::slice::from_raw_parts_mut(pointer.cast::<u32>(), count)
+            .iter()
+            .copied()
+            .all(|e| e == value));
+    });
 }
 
 fn ica_linear_1024_1024_rgba8<'a>() -> vk::ImageCreateInfo<'a> {

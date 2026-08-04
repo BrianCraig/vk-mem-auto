@@ -10,7 +10,7 @@ use std::ops::{BitOr, Deref};
 use std::rc::Rc;
 
 use ash::prelude::VkResult;
-use ash::vk;
+use ash::vk::{self, ImageCreateInfo};
 
 use self::config::AllocationConfig;
 pub use self::config::AllocationUsage;
@@ -31,6 +31,7 @@ pub enum Resource {
         vk::Image,
         crate::ffi::VmaAllocation,
         ash_owned::ImageCreateInfoOwned,
+        vk::ImageLayout,
     ),
 }
 
@@ -46,7 +47,7 @@ impl ManagedAllocation {
     fn get_vma_alloc(&self) -> crate::ffi::VmaAllocation {
         match self.resource {
             Resource::Buffer(_, pointer, _) => pointer,
-            Resource::Image(_, pointer, _) => pointer,
+            Resource::Image(_, pointer, _, _) => pointer,
         }
     }
 }
@@ -97,7 +98,7 @@ impl AllocatorHandle {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HandleError {
     FreedResource,
-    DroppedAllocator,
+    IncorrectResourceType,
 }
 
 type RcManagedAllocation = Rc<RefCell<ManagedAllocation>>;
@@ -109,6 +110,17 @@ pub struct ManagedAllocationHandle {
 }
 
 impl ManagedAllocationHandle {
+    pub fn get_image(&self) -> Result<vk::Image, HandleError> {
+        let ma = self.rc_ma.borrow();
+        if ma.freed {
+            return Err(HandleError::FreedResource);
+        }
+        match &ma.resource {
+            Resource::Buffer(_, _, _) => Err(HandleError::IncorrectResourceType),
+            Resource::Image(image, _, _, _) => Ok(*image),
+        }
+    }
+
     pub fn size(&self) -> Result<u64, HandleError> {
         let ma = self.rc_ma.borrow();
         match ma.freed {
@@ -130,6 +142,31 @@ impl ManagedAllocationHandle {
 
     pub fn resource_hints(&self) -> ResourceRequirementHints {
         self.rc_ma.borrow().hints
+    }
+
+    pub fn current_layout(&self) -> Result<vk::ImageLayout, HandleError> {
+        let ma = self.rc_ma.borrow();
+        if ma.freed {
+            return Err(HandleError::FreedResource);
+        }
+        match &ma.resource {
+            Resource::Buffer(_, _, _) => Err(HandleError::IncorrectResourceType),
+            Resource::Image(_, _, _, layout) => Ok(*layout),
+        }
+    }
+
+    pub fn set_layout(&self, new_layout: vk::ImageLayout) -> Result<(), HandleError> {
+        let mut ma = self.rc_ma.borrow_mut();
+        if ma.freed {
+            return Err(HandleError::FreedResource);
+        }
+        match &ma.resource {
+            Resource::Buffer(_, _, _) => Err(HandleError::IncorrectResourceType),
+            Resource::Image(image, vma_alloc, ici_owned, _) => {
+                ma.resource = Resource::Image(*image, *vma_alloc, *ici_owned, new_layout);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -400,7 +437,12 @@ impl AllocatorSingleThread {
 
         let rc_ma = Rc::new(RefCell::new(ManagedAllocation {
             _config: config,
-            resource: Resource::Image(image, allocation.get_raw(), image_create_info_owned),
+            resource: Resource::Image(
+                image,
+                allocation.get_raw(),
+                image_create_info_owned,
+                image_create_info.initial_layout,
+            ),
             hints,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
             freed: false,
@@ -428,7 +470,7 @@ impl AllocatorSingleThread {
                 self.allocator
                     .free_memory(&mut crate::Allocation::from_raw(*allocation));
             }
-            Resource::Image(image, allocation, _) => {
+            Resource::Image(image, allocation, _, _) => {
                 self.device.destroy_image(*image, None);
                 self.allocator
                     .free_memory(&mut crate::Allocation::from_raw(*allocation));
@@ -535,10 +577,10 @@ impl AllocatorSingleThread {
                         alloc,
                         bcio,
                     ),
-                    Resource::Image(image, alloc, icio) => Resource::Image(
+                    Resource::Image(image, alloc, icio, layout) => Resource::Image(
                         unsafe {
                             destroy_images.push(image);
-                            let ici = (&icio).into();
+                            let ici = Into::<ImageCreateInfo<'_>>::into(&icio);
                             let new_image = self.device.create_image(&ici, None).unwrap();
                             self.device
                                 .bind_image_memory(
@@ -547,100 +589,109 @@ impl AllocatorSingleThread {
                                     destination_info.offset,
                                 )
                                 .unwrap();
-                            let barrier_from = vk::ImageMemoryBarrier::default()
-                                .src_access_mask(vk::AccessFlags::NONE)
-                                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-                                .src_queue_family_index(0)
-                                .dst_queue_family_index(0)
-                                .old_layout(ici.initial_layout)
-                                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                                .image(image)
-                                .subresource_range(
-                                    vk::ImageSubresourceRange::default()
-                                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                        .level_count(vk::REMAINING_MIP_LEVELS)
-                                        .layer_count(vk::REMAINING_ARRAY_LAYERS),
-                                );
-                            let barrier_to = vk::ImageMemoryBarrier::default()
-                                .src_access_mask(vk::AccessFlags::NONE)
-                                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                                .src_queue_family_index(0)
-                                .dst_queue_family_index(0)
-                                .old_layout(ici.initial_layout)
-                                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                                .image(new_image)
-                                .subresource_range(
-                                    vk::ImageSubresourceRange::default()
-                                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                        .level_count(vk::REMAINING_MIP_LEVELS)
-                                        .layer_count(vk::REMAINING_ARRAY_LAYERS),
-                                );
+                            if layout != vk::ImageLayout::UNDEFINED {
+                                // TODO: If the layout is vk::ImageLayout::GENERAL, would be ok to just copy from, we would not need barriers (just barrier_to??).
+                                let barrier_from = vk::ImageMemoryBarrier::default()
+                                    .src_access_mask(
+                                        vk::AccessFlags::HOST_WRITE
+                                            | vk::AccessFlags::TRANSFER_WRITE
+                                            | vk::AccessFlags::MEMORY_WRITE,
+                                    )
+                                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                    .old_layout(layout)
+                                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                                    .image(image)
+                                    .subresource_range(
+                                        vk::ImageSubresourceRange::default()
+                                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                            .level_count(vk::REMAINING_MIP_LEVELS)
+                                            .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                                    );
+                                let barrier_to = vk::ImageMemoryBarrier::default()
+                                    .src_access_mask(vk::AccessFlags::NONE)
+                                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                    .old_layout(vk::ImageLayout::UNDEFINED)
+                                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                                    .image(new_image)
+                                    .subresource_range(
+                                        vk::ImageSubresourceRange::default()
+                                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                            .level_count(vk::REMAINING_MIP_LEVELS)
+                                            .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                                    );
 
-                            self.device.cmd_pipeline_barrier(
-                                self.command_buffer,
-                                vk::PipelineStageFlags::ALL_GRAPHICS,
-                                vk::PipelineStageFlags::TRANSFER,
-                                vk::DependencyFlags::BY_REGION,
-                                &[],
-                                &[],
-                                &[barrier_from, barrier_to],
-                            );
-                            self.device.cmd_copy_image(
-                                self.command_buffer,
-                                image,
-                                ash::vk::ImageLayout::TRANSFER_SRC_OPTIMAL, // TODO: We need to track the layouts
-                                new_image,
-                                ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                                std::slice::from_ref(&ash::vk::ImageCopy {
-                                    src_subresource: ash::vk::ImageSubresourceLayers {
-                                        aspect_mask: vk::ImageAspectFlags::COLOR, // TODO: Derive from ici format, test only Color
-                                        mip_level: 0,
-                                        base_array_layer: 0,
-                                        layer_count: ici.array_layers,
-                                    },
-                                    src_offset: ash::vk::Offset3D { x: 0, y: 0, z: 0 },
-                                    dst_subresource: ash::vk::ImageSubresourceLayers {
-                                        aspect_mask: vk::ImageAspectFlags::COLOR, // TODO: Derive from ici format, test only Color
-                                        mip_level: 0,
-                                        base_array_layer: 0,
-                                        layer_count: ici.array_layers,
-                                    },
-                                    dst_offset: ash::vk::Offset3D { x: 0, y: 0, z: 0 },
-                                    extent: ash::vk::Extent3D {
-                                        width: ici.extent.width,
-                                        height: ici.extent.height,
-                                        depth: ici.extent.depth,
-                                    },
-                                }),
-                            );
-                            let revert = vk::ImageMemoryBarrier::default()
-                                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                                .dst_access_mask(vk::AccessFlags::NONE)
-                                .src_queue_family_index(0)
-                                .dst_queue_family_index(0)
-                                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                                .new_layout(ici.initial_layout)
-                                .image(new_image)
-                                .subresource_range(
-                                    vk::ImageSubresourceRange::default()
-                                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                        .level_count(vk::REMAINING_MIP_LEVELS)
-                                        .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                                self.device.cmd_pipeline_barrier(
+                                    self.command_buffer,
+                                    vk::PipelineStageFlags::ALL_COMMANDS,
+                                    vk::PipelineStageFlags::TRANSFER,
+                                    vk::DependencyFlags::empty(),
+                                    &[],
+                                    &[],
+                                    &[barrier_from, barrier_to],
                                 );
+                                self.device.cmd_copy_image(
+                                    self.command_buffer,
+                                    image,
+                                    ash::vk::ImageLayout::TRANSFER_SRC_OPTIMAL, // TODO: We need to track the layouts
+                                    new_image,
+                                    ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                    std::slice::from_ref(&ash::vk::ImageCopy {
+                                        src_subresource: ash::vk::ImageSubresourceLayers {
+                                            aspect_mask: vk::ImageAspectFlags::COLOR, // TODO: Derive from ici format, test only Color
+                                            mip_level: 0,
+                                            base_array_layer: 0,
+                                            layer_count: ici.array_layers,
+                                        },
+                                        src_offset: ash::vk::Offset3D { x: 0, y: 0, z: 0 },
+                                        dst_subresource: ash::vk::ImageSubresourceLayers {
+                                            aspect_mask: vk::ImageAspectFlags::COLOR, // TODO: Derive from ici format, test only Color
+                                            mip_level: 0,
+                                            base_array_layer: 0,
+                                            layer_count: ici.array_layers,
+                                        },
+                                        dst_offset: ash::vk::Offset3D { x: 0, y: 0, z: 0 },
+                                        extent: ash::vk::Extent3D {
+                                            width: ici.extent.width,
+                                            height: ici.extent.height,
+                                            depth: ici.extent.depth,
+                                        },
+                                    }),
+                                );
+                                let revert = vk::ImageMemoryBarrier::default()
+                                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                                    .dst_access_mask(vk::AccessFlags::HOST_READ)
+                                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                                    .new_layout(layout)
+                                    .image(new_image)
+                                    .subresource_range(
+                                        vk::ImageSubresourceRange::default()
+                                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                            .level_count(vk::REMAINING_MIP_LEVELS)
+                                            .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                                    );
 
-                            self.device.cmd_pipeline_barrier(
-                                self.command_buffer,
-                                vk::PipelineStageFlags::TRANSFER,
-                                vk::PipelineStageFlags::ALL_GRAPHICS,
-                                vk::DependencyFlags::BY_REGION,
-                                &[],
-                                &[],
-                                &[revert],
-                            );
+                                self.device.cmd_pipeline_barrier(
+                                    self.command_buffer,
+                                    vk::PipelineStageFlags::TRANSFER,
+                                    vk::PipelineStageFlags::ALL_COMMANDS,
+                                    vk::DependencyFlags::BY_REGION,
+                                    &[],
+                                    &[],
+                                    &[revert],
+                                );
+                            }
+
                             new_image
                         },
                         alloc,
                         icio,
+                        layout,
                     ),
                 };
                 ma.mem_offset = (destination_info.device_memory, destination_info.offset);
