@@ -1,7 +1,6 @@
 #[cfg(feature = "build_shaders")]
 mod build_shaders;
 
-
 #[cfg(not(feature = "build_shaders"))]
 mod build_shaders {
     pub fn build() -> Result<(), Box<dyn std::error::Error>> {
@@ -54,60 +53,29 @@ fn main() {
     build.file("wrapper.cpp");
 
     let target = env::var("TARGET").unwrap();
+
+    build
+        .flag("-std=c++17")
+        .flag("-Wno-missing-field-initializers")
+        .flag("-Wno-unused-variable")
+        .flag("-Wno-unused-parameter")
+        .flag("-Wno-unused-private-field")
+        .flag("-Wno-reorder")
+        .cpp(true);
+
     if target.contains("darwin") {
         build
-            .flag("-std=c++17")
-            .flag("-Wno-missing-field-initializers")
-            .flag("-Wno-unused-variable")
-            .flag("-Wno-unused-parameter")
-            .flag("-Wno-unused-private-field")
-            .flag("-Wno-reorder")
             .flag("-Wno-nullability-completeness")
             .cpp_link_stdlib("c++")
-            .cpp_set_stdlib("c++")
-            .cpp(true);
+            .cpp_set_stdlib("c++");
     } else if target.contains("ios") {
-        build
-            .flag("-std=c++17")
-            .flag("-Wno-missing-field-initializers")
-            .flag("-Wno-unused-variable")
-            .flag("-Wno-unused-parameter")
-            .flag("-Wno-unused-private-field")
-            .flag("-Wno-reorder")
-            .cpp_link_stdlib("c++")
-            .cpp_set_stdlib("c++")
-            .cpp(true);
+        build.cpp_link_stdlib("c++").cpp_set_stdlib("c++");
     } else if target.contains("android") {
-        build
-            .flag("-std=c++17")
-            .flag("-Wno-missing-field-initializers")
-            .flag("-Wno-unused-variable")
-            .flag("-Wno-unused-parameter")
-            .flag("-Wno-unused-private-field")
-            .flag("-Wno-reorder")
-            .cpp_link_stdlib("c++")
-            .cpp(true);
+        build.cpp_link_stdlib("c++");
     } else if target.contains("linux") {
-        build
-            .flag("-std=c++17")
-            .flag("-Wno-missing-field-initializers")
-            .flag("-Wno-unused-variable")
-            .flag("-Wno-unused-parameter")
-            .flag("-Wno-unused-private-field")
-            .flag("-Wno-reorder")
-            .cpp_link_stdlib("stdc++")
-            .cpp(true);
+        build.cpp_link_stdlib("stdc++");
     } else if target.contains("windows") && target.contains("gnu") {
-        build
-            .flag("-std=c++17")
-            .flag("-Wno-missing-field-initializers")
-            .flag("-Wno-unused-variable")
-            .flag("-Wno-unused-parameter")
-            .flag("-Wno-unused-private-field")
-            .flag("-Wno-reorder")
-            .flag("-Wno-type-limits")
-            .cpp_link_stdlib("stdc++")
-            .cpp(true);
+        build.flag("-Wno-type-limits").cpp_link_stdlib("stdc++");
     }
 
     build.compile("vma");
