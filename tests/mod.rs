@@ -10,14 +10,28 @@ fn extension_names() -> Vec<*const i8> {
 }
 
 unsafe extern "system" fn vulkan_debug_callback(
-    _message_severity: ash::vk::DebugUtilsMessageSeverityFlagsEXT,
-    _message_types: ash::vk::DebugUtilsMessageTypeFlagsEXT,
+    message_severity: ash::vk::DebugUtilsMessageSeverityFlagsEXT,
+    message_types: ash::vk::DebugUtilsMessageTypeFlagsEXT,
     p_callback_data: *const ash::vk::DebugUtilsMessengerCallbackDataEXT,
     _p_user_data: *mut c_void,
 ) -> ash::vk::Bool32 {
+    let severity: &'static str = match message_severity {
+        ash::vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => "Error",
+        ash::vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => "Warning",
+        ash::vk::DebugUtilsMessageSeverityFlagsEXT::INFO => "Info",
+        ash::vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => "Verbose",
+        _ => "Unknown",
+    };
+    let message_type = match message_types {
+        ash::vk::DebugUtilsMessageTypeFlagsEXT::GENERAL => "General",
+        ash::vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => "Performance",
+        ash::vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION => "Validation",
+        ash::vk::DebugUtilsMessageTypeFlagsEXT::DEVICE_ADDRESS_BINDING => "DeviceAddressBinding",
+        _ => "Unknown",
+    };
     let p_callback_data = &*p_callback_data;
     println!(
-        "{:?}",
+        "{severity}[{message_type}] {:?}",
         ::std::ffi::CStr::from_ptr(p_callback_data.p_message)
     );
     ash::vk::FALSE
