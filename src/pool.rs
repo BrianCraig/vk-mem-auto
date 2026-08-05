@@ -479,3 +479,50 @@ impl Alloc for Allocator {
         std::ptr::null_mut()
     }
 }
+
+#[cfg(test)]
+mod test {
+    use crate as vk_mem;
+    use crate::test_suite::run::TestHarness;
+    use crate::Alloc;
+    #[test]
+    fn create_gpu_buffer_pool() {
+        let harness = TestHarness::new();
+        let allocator = harness.create_allocator();
+        let allocator = std::sync::Arc::new(allocator);
+
+        let buffer_info = ash::vk::BufferCreateInfo::default().size(16 * 1024).usage(
+            ash::vk::BufferUsageFlags::UNIFORM_BUFFER | ash::vk::BufferUsageFlags::TRANSFER_DST,
+        );
+
+        let allocation_info = vk_mem::AllocationCreateInfo {
+            required_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE,
+            preferred_flags: ash::vk::MemoryPropertyFlags::HOST_COHERENT
+                | ash::vk::MemoryPropertyFlags::HOST_CACHED,
+            flags: vk_mem::AllocationCreateFlags::MAPPED,
+
+            ..Default::default()
+        };
+        unsafe {
+            let memory_type_index = allocator
+                .find_memory_type_index_for_buffer_info(&buffer_info, &allocation_info)
+                .unwrap();
+
+            // Create a pool that can have at most 2 blocks, 128 MiB each.
+            let pool_info = vk_mem::PoolCreateInfo {
+                memory_type_index,
+                block_size: 128 * 1024 * 1024,
+                max_block_count: 2,
+                ..Default::default()
+            };
+
+            let pool = allocator.create_pool(&pool_info).unwrap();
+
+            let (buffer, mut allocation) =
+                pool.create_buffer(&buffer_info, &allocation_info).unwrap();
+            let allocation_info = allocator.get_allocation_info(&allocation);
+            assert_ne!(allocation_info.mapped_data, std::ptr::null_mut());
+            allocator.destroy_buffer(buffer, &mut allocation);
+        }
+    }
+}

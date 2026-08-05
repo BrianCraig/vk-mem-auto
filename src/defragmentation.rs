@@ -81,19 +81,18 @@ impl<'a> DefragmentationContext<'a> {
             return false;
         }
         debug_assert_eq!(result, vk::Result::INCOMPLETE);
-        let moves: Vec<_> = unsafe {
-            std::slice::from_raw_parts(pass_info.pMoves, pass_info.moveCount as usize)
-        }
-        .iter()
-        .map(|e| {
-            debug_assert_eq!(
+        let moves: Vec<_> =
+            unsafe { std::slice::from_raw_parts(pass_info.pMoves, pass_info.moveCount as usize) }
+                .iter()
+                .map(|e| {
+                    debug_assert_eq!(
                 e.operation,
                 ffi::VmaDefragmentationMoveOperation::VMA_DEFRAGMENTATION_MOVE_OPERATION_COPY
             );
-            e
-        })
-        .map(Into::into)
-        .collect();
+                    e
+                })
+                .map(Into::into)
+                .collect();
         mover(&moves);
         let result = unsafe {
             ffi::vmaEndDefragmentationPass(self.allocator.internal, self.raw, &mut pass_info)
@@ -121,5 +120,169 @@ impl Allocator {
             allocator: self,
             raw: context,
         })
+    }
+}
+#[cfg(test)]
+mod test {
+    use ash::vk;
+
+    use crate as vk_mem;
+    use crate::test_suite::run::TestHarness;
+    use crate::{Alloc, Allocation};
+    #[test]
+    fn defragment_gpu_buffers() {
+        let harness = TestHarness::new();
+        let allocator = harness.create_allocator();
+        let mut buffers = Vec::new();
+
+        let allocate_size = |size: vk::DeviceSize| {
+            /* let bci = Box::new(); */
+            let bci = vk::BufferCreateInfo::default().size(size).usage(
+                vk::BufferUsageFlags::TRANSFER_SRC
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::VERTEX_BUFFER,
+            );
+            let buffer = unsafe { harness.device.create_buffer(&bci, None).unwrap() };
+            let alloc_info = vk_mem::AllocationCreateInfo {
+                // user_data: Box::into_raw(bci).cast::<c_void>().addr(),
+                ..Default::default()
+            };
+            let allocation = unsafe {
+                allocator
+                    .allocate_memory_for_buffer(buffer, &alloc_info)
+                    .unwrap()
+            };
+            let allocation_info = allocator.get_allocation_info(&allocation);
+            unsafe {
+                harness
+                    .device
+                    .bind_buffer_memory(
+                        buffer,
+                        allocation_info.device_memory,
+                        allocation_info.offset,
+                    )
+                    .unwrap()
+            }
+            let alloc_pointer = allocation.get_raw();
+            Some((buffer, alloc_pointer))
+        };
+
+        // Allocate many buffers.
+        for _ in 0..64 {
+            buffers.push(allocate_size(64 * 1024));
+        }
+
+        // Free every other allocation.
+        for i in 0..(buffers.len() / 2) {
+            let (buffer, allocation_handle) = buffers.remove(i).unwrap();
+            unsafe {
+                allocator.destroy_buffer(buffer, &mut Allocation::from_raw(allocation_handle))
+            };
+        }
+
+        // Allocate larger buffers to worsen fragmentation.
+        for _ in 0..8 {
+            buffers.push(allocate_size(256 * 1024));
+        }
+
+        let defrag_info = vk_mem::DefragmentationInfo::default();
+
+        let ctx = unsafe { allocator.begin_defragmentation(&defrag_info).unwrap() };
+
+        let mut moved = 0usize;
+
+        while ctx.begin_pass(|moves| {
+            for mv in moves {
+                moved += 1;
+                let source_info = allocator.get_allocation_info(&mv.source);
+                let destination_info = allocator.get_allocation_info(&mv.destination);
+
+                let old_buffer = {
+                    let index = buffers
+                        .iter()
+                        .position(|x| x.unwrap().1 == mv.source.get_raw())
+                        .unwrap();
+                    buffers.remove(index).unwrap().0
+                };
+
+                let bci = vk::BufferCreateInfo::default()
+                    .size(source_info.size)
+                    .usage(
+                        vk::BufferUsageFlags::TRANSFER_SRC
+                            | vk::BufferUsageFlags::TRANSFER_DST
+                            | vk::BufferUsageFlags::VERTEX_BUFFER,
+                    );
+
+                let new_buffer = unsafe { harness.device.create_buffer(&bci, None).unwrap() };
+
+                unsafe {
+                    harness
+                        .device
+                        .bind_buffer_memory(
+                            new_buffer,
+                            destination_info.device_memory,
+                            destination_info.offset,
+                        )
+                        .unwrap()
+                }
+                unsafe {
+                    harness
+                        .device
+                        .begin_command_buffer(
+                            harness.command_buffer,
+                            &vk::CommandBufferBeginInfo::default()
+                                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                        )
+                        .unwrap();
+                    let region = vk::BufferCopy {
+                        src_offset: 0,
+                        dst_offset: 0,
+                        size: source_info.size,
+                    };
+                    harness.device.cmd_copy_buffer(
+                        harness.command_buffer,
+                        old_buffer,
+                        new_buffer,
+                        std::slice::from_ref(&region),
+                    );
+                    harness
+                        .device
+                        .end_command_buffer(harness.command_buffer)
+                        .unwrap();
+                    harness
+                        .device
+                        .queue_submit(
+                            harness.queue,
+                            &[vk::SubmitInfo::default()
+                                .command_buffers(std::slice::from_ref(&harness.command_buffer))],
+                            harness.fence,
+                        )
+                        .unwrap();
+                    harness
+                        .device
+                        .wait_for_fences(&[harness.fence], true, 1000000000)
+                        .unwrap();
+                    harness.device.reset_fences(&[harness.fence]).unwrap();
+                }
+
+                unsafe {
+                    harness.device.destroy_buffer(old_buffer, None);
+                }
+
+                buffers.push(Some((new_buffer, mv.source.get_raw())));
+            }
+        }) {}
+
+        let stats = ctx.end();
+        assert!(moved > 0);
+        assert!(stats.allocationsMoved > 0);
+
+        for entry in buffers.into_iter().flatten() {
+            let (buffer, allocation) = entry;
+            unsafe {
+                harness.device.destroy_buffer(buffer, None);
+                allocator.free_memory(&mut Allocation::from_raw(allocation));
+            }
+        }
     }
 }

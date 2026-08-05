@@ -729,3 +729,173 @@ impl Drop for AllocatorSingleThread {
         }
     }
 }
+#[cfg(test)]
+mod test {
+    use crate as vk_mem;
+    use crate::test_suite::constructors::ica_linear_1024_1024_rgba8;
+    use crate::test_suite::helpers::{assert_image, fill_image, transition_image};
+    use crate::test_suite::run::TestHarness;
+    use crate::ManagedAllocationHandle;
+    use ash::vk;
+    #[test]
+    fn auto_test() {
+        let harness = TestHarness::new();
+        let mut allocator = harness.create_allocator_single_thread();
+
+        let mut handles = vec![];
+
+        fn map_and_write(handle: &ManagedAllocationHandle, value: u8) {
+            let size = handle.size().unwrap() as usize;
+            handle
+                .map(|pointer, flush| {
+                    unsafe {
+                        pointer.write_bytes(value, size);
+                    }
+                    flush();
+                })
+                .unwrap();
+        }
+
+        for _ in 0..64 {
+            handles.push(
+                allocator
+                    .allocate_buffer(
+                        vk::BufferCreateInfo::default()
+                            .size(1024 * 256)
+                            .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
+                        vk_mem::AllocationUsage::Readback,
+                    )
+                    .unwrap(),
+            );
+        }
+
+        // Lets drop half of the allocations to make some space.
+        // Dropping their handles (this are the only ones since we didn't `copy()` them)
+        // makes them free the resource
+        let mut index = 0;
+        handles.retain(|_| {
+            index += 1;
+            index % 2 == 0
+        });
+
+        for _ in 0..8 {
+            handles.push(
+                allocator
+                    .allocate_buffer(
+                        vk::BufferCreateInfo::default()
+                            .size(1024 * 1024)
+                            .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
+                        vk_mem::AllocationUsage::Readback,
+                    )
+                    .unwrap(),
+            );
+        }
+
+        handles
+            .iter()
+            .enumerate()
+            .for_each(|(index, handle)| map_and_write(handle, index as u8));
+
+        println!("defrag pass stats: {:?}", unsafe { allocator.defrag() });
+
+        for (index, handle) in handles.iter().enumerate() {
+            let size = handle.size().unwrap() as usize;
+            handle
+                .map(|pointer, _| {
+                    let expected = u128::from_ne_bytes([index as u8; 16]);
+                    let slice = unsafe { std::slice::from_raw_parts(pointer, size) };
+                    for chunk in slice.chunks_exact(16) {
+                        let actual = u128::from_ne_bytes(chunk.try_into().unwrap());
+                        assert_eq!(actual, expected);
+                    }
+                })
+                .unwrap();
+            unsafe { handle.free().unwrap() };
+        }
+    }
+
+    #[test]
+    fn handle_incorrect_handlers_usage() {
+        let harness = TestHarness::new();
+        let allocator = harness.create_allocator_single_thread();
+
+        let handle: ManagedAllocationHandle = allocator
+            .allocate_buffer(
+                vk::BufferCreateInfo::default()
+                    .size(1024 * 1024)
+                    .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
+                vk_mem::AllocationUsage::Readback,
+            )
+            .unwrap();
+
+        assert!(handle.size().unwrap() == 1024 * 1024);
+
+        assert!(unsafe { handle.free() }.is_ok());
+
+        assert_eq!(handle.size(), Err(vk_mem::HandleError::FreedResource));
+    }
+
+    #[test]
+    fn upload_move_image() {
+        let harness = TestHarness::new();
+        let mut allocator = harness.create_allocator_single_thread();
+
+        // We use _first_image since using _ would mean it is dropped instantly, this way its dropped at the end of the test
+        let _first_image: ManagedAllocationHandle = allocator
+            .allocate_image(
+                ica_linear_1024_1024_rgba8(),
+                vk_mem::AllocationUsage::Readback,
+            )
+            .unwrap();
+
+        let second_image: ManagedAllocationHandle = allocator
+            .allocate_image(
+                ica_linear_1024_1024_rgba8(),
+                vk_mem::AllocationUsage::Readback,
+            )
+            .unwrap();
+
+        let third_image = allocator
+            .allocate_image(
+                ica_linear_1024_1024_rgba8(),
+                vk_mem::AllocationUsage::Readback,
+            )
+            .unwrap();
+
+        fill_image(&third_image, 0xfafafaff);
+
+        assert_image(&third_image, 0xfafafaff);
+
+        transition_image(&harness, &third_image, vk::ImageLayout::GENERAL);
+
+        assert_image(&third_image, 0xfafafaff);
+
+        drop(second_image);
+
+        println!("defrag pass stats: {:?}", unsafe { allocator.defrag() });
+
+        assert_image(&third_image, 0xfafafaff);
+    }
+
+    #[test]
+    fn hints_test() {
+        let harness = TestHarness::new();
+        let allocator = harness.create_allocator_single_thread();
+
+        let buffer = allocator
+            .allocate_buffer(
+                vk::BufferCreateInfo::default()
+                    .size(1024 * 1024 * 256)
+                    .usage(vk::BufferUsageFlags::VERTEX_BUFFER),
+                vk_mem::AllocationUsage::Readback,
+            )
+            .unwrap();
+
+        let image = allocator
+            .allocate_image(ica_linear_1024_1024_rgba8(), vk_mem::AllocationUsage::Cpu)
+            .unwrap();
+
+        println!("buffer hints: {:?}", buffer.resource_hints());
+        println!("image hints: {:?}", image.resource_hints());
+    }
+}

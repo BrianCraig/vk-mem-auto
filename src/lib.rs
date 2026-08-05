@@ -5,7 +5,11 @@ mod definitions;
 mod defragmentation;
 mod ffi;
 mod pool;
+mod shaders;
+#[cfg(test)]
+pub(crate) mod test_suite;
 mod virtual_block;
+
 pub use auto::*;
 pub use definitions::*;
 pub use defragmentation::*;
@@ -671,6 +675,103 @@ impl Drop for Allocator {
         unsafe {
             ffi::vmaDestroyAllocator(self.internal);
             self.internal = std::ptr::null_mut();
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super as vk_mem;
+    use super::test_suite::run::TestHarness;
+    use super::Alloc;
+    #[test]
+    fn create_gpu_buffer() {
+        let harness = TestHarness::new();
+        let allocator = harness.create_allocator();
+        let allocation_info = vk_mem::AllocationCreateInfo {
+            usage: vk_mem::MemoryUsage::Auto,
+            ..Default::default()
+        };
+
+        unsafe {
+            let (buffer, mut allocation) = allocator
+                .create_buffer(
+                    &ash::vk::BufferCreateInfo::default().size(16 * 1024).usage(
+                        ash::vk::BufferUsageFlags::VERTEX_BUFFER
+                            | ash::vk::BufferUsageFlags::TRANSFER_DST,
+                    ),
+                    &allocation_info,
+                )
+                .unwrap();
+            let allocation_info = allocator.get_allocation_info(&allocation);
+            assert_eq!(allocation_info.mapped_data, std::ptr::null_mut());
+            allocator.destroy_buffer(buffer, &mut allocation);
+        }
+    }
+
+    #[test]
+    fn create_cpu_buffer_preferred() {
+        let harness = TestHarness::new();
+        let allocator = harness.create_allocator();
+        let allocation_info = vk_mem::AllocationCreateInfo {
+            required_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE,
+            preferred_flags: ash::vk::MemoryPropertyFlags::HOST_COHERENT
+                | ash::vk::MemoryPropertyFlags::HOST_CACHED,
+            flags: vk_mem::AllocationCreateFlags::MAPPED,
+            ..Default::default()
+        };
+        unsafe {
+            let (buffer, mut allocation) = allocator
+                .create_buffer(
+                    &ash::vk::BufferCreateInfo::default().size(16 * 1024).usage(
+                        ash::vk::BufferUsageFlags::VERTEX_BUFFER
+                            | ash::vk::BufferUsageFlags::TRANSFER_DST,
+                    ),
+                    &allocation_info,
+                )
+                .unwrap();
+            let allocation_info = allocator.get_allocation_info(&allocation);
+            assert_ne!(allocation_info.mapped_data, std::ptr::null_mut());
+            allocator.destroy_buffer(buffer, &mut allocation);
+        }
+    }
+
+    #[test]
+    fn test_gpu_stats() {
+        let harness = TestHarness::new();
+        let allocator = harness.create_allocator();
+        let allocation_info = vk_mem::AllocationCreateInfo {
+            usage: vk_mem::MemoryUsage::Auto,
+            ..Default::default()
+        };
+
+        unsafe {
+            let stats_1 = allocator.calculate_statistics().unwrap();
+            assert_eq!(stats_1.total.statistics.blockCount, 0);
+            assert_eq!(stats_1.total.statistics.allocationCount, 0);
+            assert_eq!(stats_1.total.statistics.allocationBytes, 0);
+
+            let (buffer, mut allocation) = allocator
+                .create_buffer(
+                    &ash::vk::BufferCreateInfo::default().size(16 * 1024).usage(
+                        ash::vk::BufferUsageFlags::VERTEX_BUFFER
+                            | ash::vk::BufferUsageFlags::TRANSFER_DST,
+                    ),
+                    &allocation_info,
+                )
+                .unwrap();
+
+            let stats_2 = allocator.calculate_statistics().unwrap();
+            assert_eq!(stats_2.total.statistics.blockCount, 1);
+            assert_eq!(stats_2.total.statistics.allocationCount, 1);
+            assert_eq!(stats_2.total.statistics.allocationBytes, 16 * 1024);
+
+            allocator.destroy_buffer(buffer, &mut allocation);
+
+            let stats_3 = allocator.calculate_statistics().unwrap();
+            assert_eq!(stats_3.total.statistics.blockCount, 1);
+            assert_eq!(stats_3.total.statistics.allocationCount, 0);
+            assert_eq!(stats_3.total.statistics.allocationBytes, 0);
         }
     }
 }
