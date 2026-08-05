@@ -62,19 +62,22 @@ pub(crate) fn transition_image(
     handle.set_layout(new_layout).unwrap();
 }
 
-pub(crate) fn fill_image(handle: &ManagedAllocationHandle, value: u32) {
+pub(crate) fn fill<T: Sized + Clone>(handle: &ManagedAllocationHandle, value: T) {
     let size = handle.size().unwrap() as usize;
     let _ = handle.map(|pointer, flush| unsafe {
-        std::slice::from_raw_parts_mut(pointer.cast::<u32>(), size / 4).fill(value);
+        std::slice::from_raw_parts_mut(pointer.cast::<T>(), size / size_of::<T>()).fill(value);
         flush();
     });
 }
 
-pub(crate) fn assert_image(handle: &ManagedAllocationHandle, value: u32) {
+pub(crate) fn assert_filled_with<T: Sized + PartialEq + Clone>(
+    handle: &ManagedAllocationHandle,
+    value: T,
+) {
     let size = handle.size().unwrap() as usize;
-    let count = size / 4;
+    let count = size / size_of::<T>();
     let _ = handle.map(|pointer, _| unsafe {
-        assert!(std::slice::from_raw_parts(pointer.cast::<u32>(), count)
+        assert!(std::slice::from_raw_parts(pointer.cast::<T>(), count)
             .to_vec()
             .iter()
             .all(|e| *e == value));

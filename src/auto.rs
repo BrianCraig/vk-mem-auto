@@ -733,7 +733,7 @@ impl Drop for AllocatorSingleThread {
 mod test {
     use crate as vk_mem;
     use crate::test_suite::constructors::ica_linear_1024_1024_rgba8;
-    use crate::test_suite::helpers::{assert_image, fill_image, transition_image};
+    use crate::test_suite::helpers::{assert_filled_with, fill, transition_image};
     use crate::test_suite::run::TestHarness;
     use crate::ManagedAllocationHandle;
     use ash::vk;
@@ -743,18 +743,6 @@ mod test {
         let mut allocator = harness.create_allocator_single_thread();
 
         let mut handles = vec![];
-
-        fn map_and_write(handle: &ManagedAllocationHandle, value: u8) {
-            let size = handle.size().unwrap() as usize;
-            handle
-                .map(|pointer, flush| {
-                    unsafe {
-                        pointer.write_bytes(value, size);
-                    }
-                    flush();
-                })
-                .unwrap();
-        }
 
         for _ in 0..64 {
             handles.push(
@@ -794,22 +782,12 @@ mod test {
         handles
             .iter()
             .enumerate()
-            .for_each(|(index, handle)| map_and_write(handle, index as u8));
+            .for_each(|(index, handle)| fill(handle, index as u8));
 
         println!("defrag pass stats: {:?}", unsafe { allocator.defrag() });
 
         for (index, handle) in handles.iter().enumerate() {
-            let size = handle.size().unwrap() as usize;
-            handle
-                .map(|pointer, _| {
-                    let expected = u128::from_ne_bytes([index as u8; 16]);
-                    let slice = unsafe { std::slice::from_raw_parts(pointer, size) };
-                    for chunk in slice.chunks_exact(16) {
-                        let actual = u128::from_ne_bytes(chunk.try_into().unwrap());
-                        assert_eq!(actual, expected);
-                    }
-                })
-                .unwrap();
+            assert_filled_with(handle, index as u8);
             unsafe { handle.free().unwrap() };
         }
     }
@@ -862,19 +840,21 @@ mod test {
             )
             .unwrap();
 
-        fill_image(&third_image, 0xfafafaff);
+        let integrity_value = 0xfafafaff as u32;
 
-        assert_image(&third_image, 0xfafafaff);
+        fill(&third_image, integrity_value);
+
+        assert_filled_with(&third_image, integrity_value);
 
         transition_image(&harness, &third_image, vk::ImageLayout::GENERAL);
 
-        assert_image(&third_image, 0xfafafaff);
+        assert_filled_with(&third_image, integrity_value);
 
         drop(second_image);
 
         println!("defrag pass stats: {:?}", unsafe { allocator.defrag() });
 
-        assert_image(&third_image, 0xfafafaff);
+        assert_filled_with(&third_image, integrity_value);
     }
 
     #[test]
