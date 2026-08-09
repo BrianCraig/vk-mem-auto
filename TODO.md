@@ -4,16 +4,16 @@
 
 | ID | Dependencies | Task | 
 | -- | -- | -- |
-| StagingUpload | None | Staging image upload test |
-| AssertMove | None | Provide an assertion ensuring the resource has moved, test must fail if the resource did not move on defrag, this is to ensure that we are checking copy algorithms. It would be nice to have helpers that dependant of the tiling, they upload and check the data .  |
+| AssertMove | None | Provide an assertion ensuring the resource has moved, test must fail if the resource did not move on defrag, this is to ensure that we are checking copy algorithms. It would be nice to have helpers that dependant of the tiling, they upload and check the data. |
 | AspectMaskCopy | AssertMove | On Image copy, they require a Mask, we should copy all the contents of the image, but that means that requires a table of the format to aspects, for example (RGBA8 => Mask::Color, D16_S8 => Mask::Depth \| Mask::Stencil,  G8B8R8_3Plane => [Mask::P1, Mask::P2, Mask::P3]). Plane are special cases which require to have multiple SubresourceRange, and you cannot combine Mask::P1 \| Mask::P2 like the others. |
-| AspectMaskCopyTest | AssertMove | Testing suite for AssertMove, check every `format x (linear\|optimal)` ensure its valid by checking against `vkGetPhysicalDeviceFormatProperties`, it should be available and accept `VK_FORMAT_FEATURE_TRANSFER_SRC_BIT` and `VK_FORMAT_FEATURE_TRANSFER_DST_BIT`. |
-| MipsCopy | AssertMove | All mips should be copied. |
-| MipsCopyTest | AssertMove | Test for MipsCopy. |
-| LayersCopy | AssertMove | All layers should be copied. |
-| LayersCopyTest | AssertMove | Test for LayersCopy. |
-| ZDimCopy | AssertMove | All Z Dimensions of a 3D Image should be copied. |
-| ZDimCopyTest | AssertMove | Test for ZDimCopy. |
+| AspectMaskCopyTest | AssertMove | Testing suite for AssertMove, check every `format` on `linear` tiling, ensure its valid by checking against `vkGetPhysicalDeviceFormatProperties`, it should be available and accept `VK_FORMAT_FEATURE_TRANSFER_SRC_BIT` and `VK_FORMAT_FEATURE_TRANSFER_DST_BIT`. |
+| MipsCopy | AssertMove | All mips should be copied (only `linear`). |
+| MipsCopyTest | AssertMove | Test for MipsCopy (only `linear`). |
+| LayersCopy | AssertMove | All layers should be copied (only `linear`). |
+| LayersCopyTest | AssertMove | Test for LayersCopy (only `linear`). |
+| ZDimCopy | AssertMove | All Z Dimensions of a 3D Image should be copied (only `linear`). |
+| ZDimCopyTest | AssertMove | Test for ZDimCopy (only `linear`). |
+| OptimalCopyTest | \*Copy\[Test\] | We been ignoring `optimal` images because asserting that the image has been fully copied (aspect + mips + layers + zdim) requires a staging buffer and a vkImgCopy which ensures that all these subregions have been replicated. Since the code required for this is usually gotten from the knowledge of copy features, its obvious to do this after the full scope of linear copy is done. Ensure `optimal` images are correctly uploaded and asserted, on `DEVICE_LOCAL` memory, using a staging image. |
 
 #### Buffer 
 
