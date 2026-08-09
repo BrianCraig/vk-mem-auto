@@ -36,10 +36,10 @@ pub enum Resource {
 }
 
 pub struct ManagedAllocation {
-    _config: AllocationConfig,
+    pub(crate) config: AllocationConfig,
     resource: Resource,
     hints: ResourceRequirementHints,
-    mem_offset: (vk::DeviceMemory, vk::DeviceSize),
+    pub(crate) mem_offset: (vk::DeviceMemory, vk::DeviceSize),
     freed: bool,
 }
 
@@ -105,8 +105,8 @@ type RcManagedAllocation = Rc<RefCell<ManagedAllocation>>;
 
 #[derive(Clone)]
 pub struct ManagedAllocationHandle {
-    allocator: AllocatorHandle,
-    rc_ma: RcManagedAllocation,
+    pub(crate) allocator: AllocatorHandle,
+    pub(crate) rc_ma: RcManagedAllocation,
 }
 
 impl ManagedAllocationHandle {
@@ -290,8 +290,7 @@ impl AllocatorSingleThread {
             },
             AllocationUsage::Cpu => crate::AllocationCreateInfo {
                 flags: AllocationCreateFlags::HOST_ACCESS_RANDOM,
-                required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
-                preferred_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL
+                required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
                     | vk::MemoryPropertyFlags::HOST_COHERENT
                     | vk::MemoryPropertyFlags::HOST_CACHED,
                 ..Default::default()
@@ -392,7 +391,7 @@ impl AllocatorSingleThread {
         };
 
         let rc_ma = Rc::new(RefCell::new(ManagedAllocation {
-            _config: config,
+            config,
             resource: Resource::Buffer(buffer, allocation.get_raw(), buffer_create_info_owned),
             hints,
             mem_offset: (allocation_info.device_memory, allocation_info.offset),
@@ -436,7 +435,7 @@ impl AllocatorSingleThread {
         };
 
         let rc_ma = Rc::new(RefCell::new(ManagedAllocation {
-            _config: config,
+            config,
             resource: Resource::Image(
                 image,
                 allocation.get_raw(),
@@ -733,7 +732,7 @@ impl Drop for AllocatorSingleThread {
 mod test {
     use crate as vk_mem;
     use crate::test_suite::constructors::ica_linear_1024_1024_rgba8;
-    use crate::test_suite::helpers::{assert_filled_with, fill, transition_image};
+    use crate::test_suite::helpers::{assert_filled_with, fill, time, transition_image};
     use crate::test_suite::run::TestHarness;
     use crate::ManagedAllocationHandle;
     use ash::vk;
@@ -852,7 +851,10 @@ mod test {
 
         drop(second_image);
 
-        println!("defrag pass stats: {:?}", unsafe { allocator.defrag() });
+        println!(
+            "defrag pass stats: {:?}",
+            time!("defrag", unsafe { allocator.defrag() })
+        );
 
         assert_filled_with(&third_image, integrity_value);
     }

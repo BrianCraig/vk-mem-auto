@@ -3,6 +3,17 @@ use crate as vk_mem;
 use ash::vk;
 use vk_mem::ManagedAllocationHandle;
 
+macro_rules! time {
+    ($name:expr, $body:expr) => {{
+        let start = std::time::Instant::now();
+        let result = $body;
+        println!("{} took {} us", $name, start.elapsed().as_micros());
+        result
+    }};
+}
+
+pub(crate) use time;
+
 pub(crate) fn transition_image(
     harness: &crate::test_suite::run::TestHarness,
     handle: &ManagedAllocationHandle,
