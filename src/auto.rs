@@ -12,7 +12,7 @@ use std::rc::Rc;
 use ash::prelude::VkResult;
 use ash::vk::{self, ImageCreateInfo};
 
-use self::config::AllocationConfig;
+pub(crate) use self::config::AllocationConfig;
 pub use self::config::AllocationUsage;
 
 use crate::{
@@ -732,7 +732,10 @@ impl Drop for AllocatorSingleThread {
 mod test {
     use crate as vk_mem;
     use crate::test_suite::constructors::ica_linear_1024_1024_rgba8;
-    use crate::test_suite::helpers::{assert_filled_with, fill, time, transition_image};
+    use crate::test_suite::helpers::{
+        allocate_image_sandwiched_drop, assert_filled_with, fill, time, transition_image,
+        MoveChecker,
+    };
     use crate::test_suite::run::TestHarness;
     use crate::ManagedAllocationHandle;
     use ash::vk;
@@ -817,46 +820,29 @@ mod test {
         let harness = TestHarness::new();
         let mut allocator = harness.create_allocator_single_thread();
 
-        // We use _first_image since using _ would mean it is dropped instantly, this way its dropped at the end of the test
-        let _first_image: ManagedAllocationHandle = allocator
-            .allocate_image(
-                ica_linear_1024_1024_rgba8(),
-                vk_mem::AllocationUsage::Readback,
-            )
-            .unwrap();
-
-        let second_image: ManagedAllocationHandle = allocator
-            .allocate_image(
-                ica_linear_1024_1024_rgba8(),
-                vk_mem::AllocationUsage::Readback,
-            )
-            .unwrap();
-
-        let third_image = allocator
-            .allocate_image(
-                ica_linear_1024_1024_rgba8(),
-                vk_mem::AllocationUsage::Readback,
-            )
-            .unwrap();
+        let image: ManagedAllocationHandle = allocate_image_sandwiched_drop(
+            &allocator,
+            ica_linear_1024_1024_rgba8(),
+            vk_mem::AllocationUsage::Readback,
+        )
+        .unwrap();
+        let mut move_checker = MoveChecker::new(&image);
 
         let integrity_value = 0xfafafaff as u32;
 
-        fill(&third_image, integrity_value);
+        fill(&image, integrity_value);
+        assert_filled_with(&image, integrity_value);
+        transition_image(&harness, &image, vk::ImageLayout::GENERAL);
 
-        assert_filled_with(&third_image, integrity_value);
-
-        transition_image(&harness, &third_image, vk::ImageLayout::GENERAL);
-
-        assert_filled_with(&third_image, integrity_value);
-
-        drop(second_image);
+        assert_filled_with(&image, integrity_value);
 
         println!(
             "defrag pass stats: {:?}",
             time!("defrag", unsafe { allocator.defrag() })
         );
 
-        assert_filled_with(&third_image, integrity_value);
+        move_checker.assert_moved();
+        assert_filled_with(&image, integrity_value);
     }
 
     #[test]

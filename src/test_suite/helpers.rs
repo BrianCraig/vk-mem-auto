@@ -94,3 +94,64 @@ pub(crate) fn assert_filled_with<T: Sized + PartialEq + Clone>(
             .all(|e| *e == value));
     });
 }
+
+/// Allocate between other images, then drop both so on defrag there is commonly a move op.
+pub(crate) fn allocate_image_sandwiched_drop(
+    allocator: &crate::AllocatorHandle,
+    image_create_info: vk::ImageCreateInfo<'_>,
+    config: impl Into<crate::AllocationConfig>,
+) -> crate::VkResult<crate::ManagedAllocationHandle> {
+    let _before = allocator
+        .allocate_image(
+            super::constructors::ica_linear_1024_1024_rgba8(),
+            vk_mem::AllocationUsage::Readback,
+        )
+        .unwrap();
+    let out = allocator.allocate_image(image_create_info, config);
+    let _after = allocator
+        .allocate_image(
+            super::constructors::ica_linear_1024_1024_rgba8(),
+            vk_mem::AllocationUsage::Readback,
+        )
+        .unwrap();
+    out
+}
+
+pub(crate) struct MoveChecker {
+    handle: ManagedAllocationHandle,
+    mem_offset: (vk::DeviceMemory, u64),
+}
+
+impl MoveChecker {
+    pub(crate) fn new(handle: &ManagedAllocationHandle) -> MoveChecker {
+        MoveChecker {
+            handle: handle.clone(),
+            mem_offset: handle.rc_ma.borrow().mem_offset,
+        }
+    }
+
+    /// Assert that the mem has moved.
+    ///
+    /// This is currently not 100% exact, there is a small chance that the mem is in the
+    /// same exact vkMemory and offset, and has moved.
+    /// Since this is for testing purpose, we currently don't care too much,
+    /// but once we have done the `AbsorbVMA` task, we should attack this problem.
+    pub(crate) fn assert_moved(&mut self) {
+        let current = self.handle.rc_ma.borrow().mem_offset;
+        assert_ne!(self.mem_offset, current, "Allocation has not moved");
+        self.mem_offset = current;
+    }
+
+    /// Assert that the mem has **not** moved.
+    ///
+    /// This is currently not 100% exact, there is a small chance that the mem is in the
+    /// same exact vkMemory and offset, and has moved.
+    /// Since this is for testing purpose, we currently don't care too much,
+    /// but once we have done the `AbsorbVMA` task, we should attack this problem.
+    ///
+    /// please remove `_` on first use.
+    pub(crate) fn _assert_not_moved(&self) {
+        let current = self.handle.rc_ma.borrow().mem_offset;
+        assert_eq!(self.mem_offset, current, "Allocation has moved");
+    }
+}
