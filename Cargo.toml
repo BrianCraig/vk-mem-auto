@@ -9,7 +9,7 @@ documentation = "https://docs.rs/vk-mem"
 readme = "README.md"
 keywords = ["vulkan", "vk", "ash", "memory", "allocator"]
 categories = ["api-bindings", "rendering", "rendering::engine", "rendering::graphics-api", ]
-license = "MIT/Apache-2.0"
+license-file = "LICENSE"
 build = "build.rs"
 include = [
     "src/*.rs",

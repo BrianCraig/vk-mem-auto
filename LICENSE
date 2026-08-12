@@ -1,0 +1,19 @@
+vk-mem-auto project License
+
+Copyright (c) 2026 Brian Eduardo Craig
+
+Permission is hereby granted, free of charge, to any person or organization obtaining a copy of this software and associated documentation files (the "Software"), to use, copy, modify, and distribute the Software, subject to the following conditions.
+
+The Software may be used free of charge by individuals and organizations whose total annual gross revenue, including the revenue of any parent, subsidiary, affiliate, or other entity under common control, does not exceed USD $2,500,000. An organization exceeding this threshold, or an organization controlled by an entity exceeding this threshold, is not granted rights under this License.
+
+The Software may not be used by any organization whose products or services primarily or secondarily consist of, provide, sell, license, or commercially distribute artificial intelligence, machine-learning, generative AI, or similar AI systems, models, products, or services.
+
+The Software may be modified and redistributed free of charge, provided that all modified versions remain under this License and retain the original copyright notice and this License.
+
+The Software may be incorporated into and distributed as part of an end-user application, game, or other end-user product, including products that are commercially sold or licensed. However, the Software may not be sold, licensed, sublicensed, or commercially distributed as a standalone product or as part of a software development product, development platform, framework, engine, SDK, library, middleware, or other developer-facing software intended to provide reusable software functionality to third parties.
+
+A copy of this License and the applicable copyright notices must accompany every distribution of the Software or any substantial portion thereof. No additional or broader rights may be granted by redistribution or modification.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+This License is a source-available license and is not an Open Source license.

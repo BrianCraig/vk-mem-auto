@@ -35,7 +35,6 @@
 | Readme | None | Modify Readme to explain the intentions of this library, its fork, its inspiration, samples, and explanation of what is **not** the library, and the status. |
 | NotCode | None | Remove what is not the library intended, exposed VMA_Allocator, pools, virtual memory... |
 | Cleanup | None | `.vscode`, `CHANGES`, `CODE_OF_CONDUCT` |
-| License | None | Determine if we are doing the correct licensing |
 
 
 ## Done
@@ -43,3 +42,4 @@
 | ID | Category | Task | 
 | -- | -- | -- |
 | AssertMove | Image | Provide an assertion ensuring the resource has moved, test must fail if the resource did not move on defrag, this is to ensure that we are checking copy algorithms. ~~It would be nice to have helpers that dependant of the tiling, they upload and check the data.~~ |
+| License | Project | ~~Determine if we are doing the correct licensing~~ Provide a License. |

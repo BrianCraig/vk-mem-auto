@@ -1,0 +1,12 @@
+This project contains portions derived from:
+
+- vk-mem project library
+  Licensed under the MIT License.
+  See LICENSE-VK-MEM-RS.
+
+- Vulkan Memory Allocator (VMA)
+  Licensed under the MIT License.
+  See LICENSE-VMA.
+
+All other original code is Copyright (c) 2026 Brian Eduardo Craig
+and is licensed under the vk-mem-auto project License.

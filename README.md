@@ -5,8 +5,6 @@ vk-mem
 [![Latest version](https://img.shields.io/crates/v/vk-mem.svg)](https://crates.io/crates/vk-mem)
 [![Documentation](https://docs.rs/vk-mem/badge.svg)](https://docs.rs/vk-mem)
 [![Lines of Code](https://tokei.rs/b1/github/gwihlidal/vk-mem-rs)](https://github.com/gwihlidal/vk-mem-rs)
-![MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-![APACHE2](https://img.shields.io/badge/license-APACHE2-blue.svg)
 
 This crate provides an FFI layer and idiomatic rust wrappers for the excellent AMD Vulkan Memory Allocator (VMA) C/C++ library.
 
@@ -161,12 +159,12 @@ update-alternatives --set i686-w64-mingw32-g++ /usr/bin/i686-w64-mingw32-g++-pos
 
 ## License
 
-Licensed under either of
+[vk-mem-auto project License](LICENSE)
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+Free for individuals and organizations with up to **$2.5M annual gross revenue**.  
+Commercial use in end-user products is permitted; commercial distribution as a developer-facing product, or AI related company is not.
 
-at your option.
+Third-party components are distributed under their respective licenses.
 
 ## Credits and Special Thanks
 
